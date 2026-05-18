@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+apps/web/dist
+apps/api/web-doc
+storage/webdoc.db
+storage/docs/
+.git
+.gitignore
+.idea
+.vscode
+*.log
+*.md
+Dockerfile
+docker-compose*.yml

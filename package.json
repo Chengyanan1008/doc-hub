@@ -1,0 +1,27 @@
+{
+  "name": "web-doc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web-Doc · 一站式 HTML 文档站（Go + React）一键启动脚本",
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta -k --kill-others-on-fail \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "cd apps/api && go run ./cmd/server",
+    "dev:web": "cd apps/web && npm run dev",
+
+    "build": "npm run build:web && npm run build:api",
+    "build:api": "cd apps/api && go build -o ../../dist/webdoc-server ./cmd/server",
+    "build:web": "cd apps/web && npm run build",
+
+    "start": "./dist/webdoc-server",
+
+    "install:all": "npm install && cd apps/web && npm install",
+    "clean": "rm -rf dist apps/web/dist apps/web/node_modules"
+  },
+  "devDependencies": {
+    "concurrently": "latest"
+  },
+  "engines": {
+    "node": ">=18",
+    "go": ">=1.21"
+  }
+}
