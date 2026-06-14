@@ -1,10 +1,11 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Code2, ExternalLink, FileText, Maximize2, Minimize2,
-  PanelLeftClose, PanelLeftOpen,
+  Code2, ExternalLink, FileText, Home, Maximize2, Minimize2,
+  Lock, PanelLeftClose, PanelLeftOpen,
   PanelsTopLeft, RefreshCw, Share2, Sparkles, SplitSquareHorizontal,
 } from 'lucide-react'
-import { Nodes, type DocNode } from '@/lib/api'
+import { useNavigate } from 'react-router-dom'
+import { Nodes, getToken, type DocNode, type NodeLockInfo } from '@/lib/api'
 import { DOC_ASSET_BASE, WS_BASE } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -13,6 +14,7 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '@/components/ui/dropdown-menu'
 import { CodeEditor } from '@/components/CodeEditor'
+import { MarkdownPreview } from '@/components/MarkdownPreview'
 import { AIChatPanel } from '@/components/AIChatPanel'
 import { useAIChatStore } from '@/store/aiChat'
 import { useAuthStore } from '@/store/auth'
@@ -72,6 +74,19 @@ function looksLikeBase64Url(s: string): boolean {
   return s.length >= 2 && /^[A-Za-z0-9_-]+$/.test(s)
 }
 
+function stripInternalQueryParams(raw: string): string {
+  if (!raw) return ''
+  try {
+    const u = new URL(raw, 'http://__local__/')
+    u.searchParams.delete('v')
+    u.searchParams.delete('token')
+    const q = u.searchParams.toString()
+    return `${u.pathname.replace(/^\//, '')}${q ? `?${q}` : ''}${u.hash}`
+  } catch {
+    return raw
+  }
+}
+
 /**
  * 计算 iframe 的资源根：DOC_ASSET_BASE/{docId}/
  * 末尾保证有 "/"，方便做前缀去除。
@@ -105,11 +120,11 @@ function readInnerPathFromOuter(): string {
       const decoded = decodeInnerPath(raw)
       // 解码出的内容含不可见控制字符则视为不合法，回退明文
       if (decoded != null && !/[\u0000-\u001f\u007f]/.test(decoded)) {
-        return decoded.replace(/^\/+/, '')
+        return stripInternalQueryParams(decoded.replace(/^\/+/, ''))
       }
     }
     // 回退：兼容旧的 encodeURIComponent 格式或手写明文
-    return raw.replace(/^\/+/, '')
+    return stripInternalQueryParams(raw.replace(/^\/+/, ''))
   } catch {
     return ''
   }
@@ -164,7 +179,7 @@ type ViewMode = 'preview' | 'code' | 'split'
 
 export function DocViewer({
   doc, onShare, onOpenAISettings, chromeless = false,
-  sidebarOpen, onToggleSidebar,
+  sidebarOpen, onToggleSidebar, onHome,
 }: {
   doc: DocNode
   onShare: (doc: DocNode) => void
@@ -175,7 +190,10 @@ export function DocViewer({
   sidebarOpen?: boolean
   /** 切换侧栏显隐的回调（仅非 chromeless 模式下使用） */
   onToggleSidebar?: () => void
+  /** 返回首页。由外层负责同时清空当前选中文档和路由。 */
+  onHome?: () => void
 }) {
+  const navigate = useNavigate()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
@@ -184,11 +202,15 @@ export function DocViewer({
   const [mode, setMode] = useState<ViewMode>('preview')
   const [files, setFiles] = useState<string[]>([])
   const [activeFile, setActiveFile] = useState<string>(doc.entryFile || 'index.html')
+  const [lockInfo, setLockInfo] = useState<NodeLockInfo | null>(null)
+  const [lockError, setLockError] = useState<string | null>(null)
 
   const { panelOpen, openPanel, closePanel, togglePanel, runningDocId } = useAIChatStore()
   const { user, openLogin } = useAuthStore()
   const aiOpen = panelOpen
   const aiRunning = runningDocId === doc.id
+  const lockedByOther = !!lockInfo?.locked && lockInfo.owner?.id !== user?.id
+  const lockOwnerName = lockInfo?.owner?.name || '其他用户'
 
   // [debug] 渲染日志
   console.log('[DocViewer] render', {
@@ -253,7 +275,9 @@ export function DocViewer({
     // inner 可能已经带 query/hash，需要正确合并 cache-bust 的 v=reloadKey
     const [pathAndQuery, hash] = inner.split('#')
     const sep = pathAndQuery.includes('?') ? '&' : '?'
-    const url = `${DOC_ASSET_BASE}/${doc.id}/${pathAndQuery}${sep}v=${reloadKey}${hash ? `#${hash}` : ''}`
+    const token = getToken()
+    const authPart = token ? `&token=${encodeURIComponent(token)}` : ''
+    const url = `${DOC_ASSET_BASE}/${doc.id}/${pathAndQuery}${sep}v=${reloadKey}${authPart}${hash ? `#${hash}` : ''}`
     console.log('[DocViewer] src recomputed', {
       docId: doc.id,
       entryFile: doc.entryFile,
@@ -264,6 +288,12 @@ export function DocViewer({
     })
     return url
   }, [doc.id, doc.entryFile, reloadKey])
+
+  const previewFile = useMemo(() => {
+    const inner = initialInnerPathRef.current.value || (doc.entryFile || 'index.html')
+    return inner.split('#')[0].split('?')[0] || 'index.html'
+  }, [doc.id, doc.entryFile, reloadKey])
+  const markdownPreview = /\.md$/i.test(previewFile)
 
   // 加载文件列表
   useEffect(() => {
@@ -290,7 +320,8 @@ export function DocViewer({
 
   // WebSocket 监听：服务端文件变动 → 触发预览 + 编辑器重读
   useEffect(() => {
-    const wsUrl = `${WS_BASE}/docs/${doc.id}`
+    const token = getToken()
+    const wsUrl = `${WS_BASE}/docs/${doc.id}${token ? `?token=${encodeURIComponent(token)}` : ''}`
     console.log('[DocViewer] WS connecting', wsUrl)
     const ws = new WebSocket(wsUrl)
     ws.onopen = () => {
@@ -352,6 +383,68 @@ export function DocViewer({
     }
   }
 
+  const ensureEditLock = useCallback(async () => {
+    if (!user) return false
+    try {
+      const lock = await Nodes.acquireLock(doc.id)
+      setLockInfo(lock)
+      setLockError(null)
+      return !lock.locked || lock.owner?.id === user.id
+    } catch (e: any) {
+      const lock = e?.response?.data?.lock as NodeLockInfo | undefined
+      if (lock) setLockInfo(lock)
+      setLockError(e?.response?.data?.error ?? '获取编辑锁失败')
+      return false
+    }
+  }, [doc.id, user])
+
+  useEffect(() => {
+    if (!user || chromeless) return
+    let stopped = false
+    const refresh = async () => {
+      try {
+        const lock = await Nodes.getLock(doc.id)
+        if (!stopped) setLockInfo(lock)
+      } catch {
+        // ignore
+      }
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 10000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [doc.id, user, chromeless])
+
+  useEffect(() => {
+    if (!user || chromeless) return
+    if (mode !== 'code' && mode !== 'split') return
+    let stopped = false
+    const renew = async () => {
+      const ok = await ensureEditLock()
+      if (!ok && !stopped) setMode('preview')
+    }
+    renew()
+    const timer = window.setInterval(renew, 30000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+      Nodes.releaseLock(doc.id).catch(() => {})
+    }
+  }, [doc.id, mode, user, chromeless, ensureEditLock])
+
+  const handleModeChange = async (next: ViewMode) => {
+    if (next === 'code' || next === 'split') {
+      const ok = await ensureEditLock()
+      if (!ok) {
+        setMode('preview')
+        return
+      }
+    }
+    setMode(next)
+  }
+
   /**
    * iframe 内部路径变化时回写到外层 URL 的 ?p= 参数
    * - 自动剥离 cache-bust 用的 v 参数
@@ -375,6 +468,7 @@ export function DocViewer({
       // 借助一个虚拟 base 来解析相对 URL
       const u = new URL(rel, 'http://__local__/')
       u.searchParams.delete('v')
+      u.searchParams.delete('token')
       const q = u.searchParams.toString()
       cleaned = `${u.pathname.replace(/^\//, '')}${q ? `?${q}` : ''}${u.hash}`
     } catch {
@@ -425,14 +519,18 @@ export function DocViewer({
   if (chromeless) {
     return (
       <div className="relative h-full w-full bg-white">
-        <PreviewFrame
-          ref={iframeRef}
-          src={src}
-          title={doc.title}
-          tag="chromeless"
-          docId={doc.id}
-          onInnerNavigate={handleInnerNavigate}
-        />
+        {markdownPreview ? (
+          <MarkdownPreview doc={doc} filePath={previewFile} reloadKey={reloadKey} />
+        ) : (
+          <PreviewFrame
+            ref={iframeRef}
+            src={src}
+            title={doc.title}
+            tag="chromeless"
+            docId={doc.id}
+            onInnerNavigate={handleInnerNavigate}
+          />
+        )}
       </div>
     )
   }
@@ -445,7 +543,7 @@ export function DocViewer({
       {/* 顶部工具栏 */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border/60 glass">
         <div className="flex items-center gap-3 min-w-0">
-          {onToggleSidebar && (
+          {onToggleSidebar && !sidebarOpen && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="ghost" size="icon" onClick={onToggleSidebar}>
@@ -455,11 +553,29 @@ export function DocViewer({
               <TooltipContent>{sidebarOpen ? '关闭侧栏' : '打开侧栏'}</TooltipContent>
             </Tooltip>
           )}
+          <Button variant="ghost" size="sm" onClick={() => onHome ? onHome() : navigate('/')}>
+            <Home /> 首页
+          </Button>
           <span className={cn(
             'h-2 w-2 rounded-full shrink-0',
             connected ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground/40',
           )} />
           <span className="text-sm font-medium truncate">{doc.title}</span>
+          {lockedByOther && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200">
+              <Lock className="h-3 w-3" />
+              {lockOwnerName} 正在编辑
+            </span>
+          )}
+          {!lockedByOther && lockInfo?.locked && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">
+              <Lock className="h-3 w-3" />
+              你正在编辑
+            </span>
+          )}
+          {lockError && lockedByOther && (
+            <span className="sr-only">{lockError}</span>
+          )}
           {files.length > 1 && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -480,7 +596,7 @@ export function DocViewer({
         </div>
 
         <div className="flex items-center gap-1">
-          <Tabs value={mode} onValueChange={(v) => setMode(v as ViewMode)}>
+          <Tabs value={mode} onValueChange={(v) => handleModeChange(v as ViewMode)}>
             <TabsList>
               <TabsTrigger value="preview"><PanelsTopLeft className="h-3 w-3" />预览</TabsTrigger>
               <TabsTrigger value="split"><SplitSquareHorizontal className="h-3 w-3" />分屏</TabsTrigger>
@@ -546,14 +662,18 @@ export function DocViewer({
         <div className="relative flex-1 min-w-0 overflow-hidden">
           {/* 预览模式 */}
           <div className={cn('absolute inset-0', mode === 'preview' ? 'block' : 'hidden')}>
-            <PreviewFrame
-              ref={iframeRef}
-              src={src}
-              title={doc.title}
-              tag="preview"
-              docId={doc.id}
-              onInnerNavigate={handleInnerNavigate}
-            />
+            {markdownPreview ? (
+              <MarkdownPreview doc={doc} filePath={previewFile} reloadKey={reloadKey} />
+            ) : (
+              <PreviewFrame
+                ref={iframeRef}
+                src={src}
+                title={doc.title}
+                tag="preview"
+                docId={doc.id}
+                onInnerNavigate={handleInnerNavigate}
+              />
+            )}
           </div>
 
           {/* 代码模式 */}
@@ -561,6 +681,8 @@ export function DocViewer({
             <CodeEditor
               doc={doc}
               filePath={activeFile}
+              readOnly={lockedByOther}
+              readOnlyReason={`${lockOwnerName} 正在编辑，暂时不能编辑。`}
               externalReloadKey={reloadKey}
               onSavedExternally={() => setReloadKey((k) => k + 1)}
             />
@@ -572,18 +694,24 @@ export function DocViewer({
               <CodeEditor
                 doc={doc}
                 filePath={activeFile}
+                readOnly={lockedByOther}
+                readOnlyReason={`${lockOwnerName} 正在编辑，暂时不能编辑。`}
                 externalReloadKey={reloadKey}
                 onSavedExternally={() => setReloadKey((k) => k + 1)}
               />
             </div>
             <div className="bg-white min-w-0 h-full relative overflow-hidden">
-              <PreviewFrame
-                src={src}
-                title={`${doc.title} (split)`}
-                tag="split"
-                docId={doc.id}
-                onInnerNavigate={handleInnerNavigate}
-              />
+              {markdownPreview ? (
+                <MarkdownPreview doc={doc} filePath={previewFile} reloadKey={reloadKey} />
+              ) : (
+                <PreviewFrame
+                  src={src}
+                  title={`${doc.title} (split)`}
+                  tag="split"
+                  docId={doc.id}
+                  onInnerNavigate={handleInnerNavigate}
+                />
+              )}
             </div>
           </div>
         </div>

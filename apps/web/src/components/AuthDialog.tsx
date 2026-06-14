@@ -72,7 +72,7 @@ export function AuthDialog() {
             </div>
             <div>
               <DialogTitle className="text-xl">
-                欢迎来到 <span className="text-gradient">Web-Doc</span>
+                欢迎来到 <span className="text-gradient">Doc-Hub</span>
               </DialogTitle>
               <DialogDescription className="mt-0.5">
                 登录后即可使用 AI 生成与编辑功能

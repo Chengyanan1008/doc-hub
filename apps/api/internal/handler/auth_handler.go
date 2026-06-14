@@ -9,8 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/xiaofengguo/web-doc/api/internal/auth"
-	"github.com/xiaofengguo/web-doc/api/internal/model"
+	"doc-hub/api/internal/auth"
+	"doc-hub/api/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -166,6 +166,146 @@ func (h *Handler) AuthMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": publicUser(&u)})
 }
 
+type changePasswordReq struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+func (h *Handler) AuthChangePassword(c *gin.Context) {
+	uid := getLocal(c, "userID")
+	if uid == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	var req changePasswordReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, err.Error())
+		return
+	}
+	if req.CurrentPassword == "" {
+		badRequest(c, "请输入当前密码")
+		return
+	}
+	if len(req.NewPassword) < 6 {
+		badRequest(c, "新密码至少 6 位")
+		return
+	}
+	if req.CurrentPassword == req.NewPassword {
+		badRequest(c, "新密码不能与当前密码相同")
+		return
+	}
+	var u model.User
+	if err := h.DB.First(&u, "id = ?", uid).Error; err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, req.CurrentPassword) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "当前密码错误"})
+		return
+	}
+	hash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		serverError(c, err)
+		return
+	}
+	if err := h.DB.Model(&u).Update("password_hash", hash).Error; err != nil {
+		serverError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ============== 管理员用户管理 ==============
+
+func (h *Handler) AdminListUsers(c *gin.Context) {
+	var users []model.User
+	if err := h.DB.Order("created_at asc").Find(&users).Error; err != nil {
+		serverError(c, err)
+		return
+	}
+	out := make([]publicUserView, 0, len(users))
+	for i := range users {
+		out = append(out, publicUser(&users[i]))
+	}
+	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
+type adminCreateUserReq struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+}
+
+func (h *Handler) AdminCreateUser(c *gin.Context) {
+	var req adminCreateUserReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, err.Error())
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.Role = strings.TrimSpace(req.Role)
+	if req.Role == "" {
+		req.Role = "user"
+	}
+	if req.Role != "user" && req.Role != "admin" {
+		badRequest(c, "角色必须是 user 或 admin")
+		return
+	}
+	if !usernameRe.MatchString(req.Username) {
+		badRequest(c, "用户名需 3-32 位字母/数字/下划线")
+		return
+	}
+	if len(req.Password) < 6 {
+		badRequest(c, "密码至少 6 位")
+		return
+	}
+	if req.Email != "" && !emailRe.MatchString(req.Email) {
+		badRequest(c, "邮箱格式不正确")
+		return
+	}
+
+	var exist model.User
+	if err := h.DB.Where("username = ?", req.Username).First(&exist).Error; err == nil {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "用户名已存在"})
+		return
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		serverError(c, err)
+		return
+	}
+	if req.Email != "" {
+		if err := h.DB.Where("email = ?", req.Email).First(&exist).Error; err == nil {
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "邮箱已注册"})
+			return
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			serverError(c, err)
+			return
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		serverError(c, err)
+		return
+	}
+	u := model.User{
+		ID:           uuid.NewString(),
+		Username:     req.Username,
+		Email:        req.Email,
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		Role:         req.Role,
+	}
+	if err := h.DB.Create(&u).Error; err != nil {
+		serverError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": publicUser(&u)})
+}
+
 // ============== 公共信息：注册是否开放 ==============
 
 func (h *Handler) AuthPublicInfo(c *gin.Context) {
@@ -186,6 +326,14 @@ func (h *Handler) AuthRequired(c *gin.Context) {
 	c.Next()
 }
 
+func (h *Handler) AdminRequired(c *gin.Context) {
+	if getLocal(c, "role") != "admin" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "需要管理员权限"})
+		return
+	}
+	c.Next()
+}
+
 // AuthOptional 解析但不强制
 func (h *Handler) AuthOptional(c *gin.Context) {
 	h.parseBearer(c)
@@ -194,6 +342,9 @@ func (h *Handler) AuthOptional(c *gin.Context) {
 
 func (h *Handler) parseBearer(c *gin.Context) string {
 	header := c.GetHeader("Authorization")
+	if header == "" {
+		header = c.Query("token")
+	}
 	if header == "" {
 		return ""
 	}

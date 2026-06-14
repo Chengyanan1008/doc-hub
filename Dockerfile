@@ -33,7 +33,7 @@ COPY apps/api/go.mod apps/api/go.sum ./
 RUN go mod download
 
 COPY apps/api/ ./
-RUN go build -trimpath -ldflags "-s -w" -o /out/web-doc ./cmd/server
+RUN go build -trimpath -ldflags "-s -w" -o /out/doc-hub ./cmd/server
 
 ############################
 # Stage 3: runtime
@@ -46,7 +46,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 WORKDIR /app
 
 # 后端二进制
-COPY --from=api-builder /out/web-doc /app/web-doc
+COPY --from=api-builder /out/doc-hub /app/doc-hub
 
 # 前端构建产物
 COPY --from=web-builder /web/dist /app/web
@@ -56,14 +56,14 @@ RUN mkdir -p /data/docs && chown -R app:app /app /data
 
 USER app
 
-ENV WEBDOC_ADDR=:8787 \
-    WEBDOC_STORAGE=/data/docs \
-    WEBDOC_WEB_ROOT=/app/web \
-    WEBDOC_ORIGIN=*
+ENV DOC_HUB_ADDR=:8787 \
+    DOC_HUB_STORAGE=/data/docs \
+    DOC_HUB_WEB_ROOT=/app/web \
+    DOC_HUB_ORIGIN=*
 
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8787/healthz || exit 1
 
-ENTRYPOINT ["/app/web-doc"]
+ENTRYPOINT ["/app/doc-hub"]

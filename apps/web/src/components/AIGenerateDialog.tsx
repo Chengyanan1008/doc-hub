@@ -14,6 +14,7 @@ interface Props {
   /** 'create' 时使用 parentId；'edit'/'rewrite' 时使用 doc */
   mode: 'create' | 'edit' | 'rewrite'
   parentId?: string | null
+  scope?: 'personal' | 'public'
   doc?: DocNode | null
   onOpenSettings: () => void
 }
@@ -32,7 +33,7 @@ const SUGGESTIONS_EDIT = [
 ]
 
 export function AIGenerateDialog({
-  open, onOpenChange, mode, parentId, doc, onOpenSettings,
+  open, onOpenChange, mode, parentId, scope = 'personal', doc, onOpenSettings,
 }: Props) {
   const { upsertFromServer, selectDoc, loadAll } = useDocsStore()
   const [prompt, setPrompt] = useState('')
@@ -63,6 +64,7 @@ export function AIGenerateDialog({
         mode,
         docId: doc?.id,
         parentId: isCreate ? (parentId ?? null) : undefined,
+        scope: isCreate ? scope : undefined,
       },
       {
         onMeta: async (m) => {
@@ -98,7 +100,7 @@ export function AIGenerateDialog({
           </DialogTitle>
           <DialogDescription>
             {isCreate
-              ? '描述你想要的 HTML 文档，AI 将流式生成并实时预览。'
+              ? '描述你想要的文档或页面，AI 将流式生成并实时预览。'
               : '描述你想要的修改，AI 会基于现有内容重新生成。'}
           </DialogDescription>
         </DialogHeader>

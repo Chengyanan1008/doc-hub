@@ -11,13 +11,16 @@ export function prefixed(p: string): string {
 }
 
 // ---------- 鉴权 Token 存取 ----------
-const TOKEN_KEY = 'webdoc.token'
+const TOKEN_KEY = 'doc-hub.token'
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
 export function setToken(t: string | null) {
-  if (t) localStorage.setItem(TOKEN_KEY, t)
-  else localStorage.removeItem(TOKEN_KEY)
+  if (t) {
+    localStorage.setItem(TOKEN_KEY, t)
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
 }
 
 export const api = axios.create({
@@ -41,7 +44,7 @@ api.interceptors.response.use(
   (err) => {
     if (err?.response?.status === 401) {
       setToken(null)
-      window.dispatchEvent(new CustomEvent('webdoc:unauthorized'))
+      window.dispatchEvent(new CustomEvent('doc-hub:unauthorized'))
     }
     return Promise.reject(err)
   },
@@ -53,19 +56,62 @@ export const DOC_ASSET_BASE = prefixed('/d')
 export const WS_BASE =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + prefixed('/ws')
 
+export function docAssetUrl(docId: string, path = 'index.html', params?: Record<string, string | number | undefined>) {
+  const cleanPath = path.replace(/^\/+/, '') || 'index.html'
+  const url = new URL(`${DOC_ASSET_BASE}/${docId}/${cleanPath}`, window.location.origin)
+  for (const [k, v] of Object.entries(params ?? {})) {
+    if (v !== undefined && v !== '') url.searchParams.set(k, String(v))
+  }
+  return url.pathname + url.search + url.hash
+}
+
 export type NodeType = 'folder' | 'doc'
 
 export interface DocNode {
   id: string
   parentId?: string | null
+  scope?: 'personal' | 'public'
   type: NodeType
   title: string
   entryFile?: string
   sortOrder: number
   visibility: 'private' | 'public'
   sizeBytes: number
+  createdBy?: string
+  updatedBy?: string
+  lockOwner?: string
+  lockUntil?: string | null
   createdAt: string
   updatedAt: string
+}
+
+export interface UserBrief {
+  id: string
+  name: string
+  username?: string
+}
+
+export interface NodeLockInfo {
+  locked: boolean
+  owner?: UserBrief
+  until?: string
+}
+
+export interface NodeInfo {
+  id: string
+  title: string
+  type: NodeType
+  scope: 'personal' | 'public'
+  visibility: 'private' | 'public'
+  sizeBytes: number
+  entryFile?: string
+  parentId?: string | null
+  createdAt: string
+  updatedAt: string
+  owner: UserBrief
+  createdBy: UserBrief
+  updatedBy: UserBrief
+  currentLock: NodeLockInfo
 }
 
 export interface ShareInfo {
@@ -77,13 +123,22 @@ export interface ShareInfo {
 
 export const Nodes = {
   list: () => api.get<{ items: DocNode[] }>('/nodes').then(r => r.data.items),
-  create: (payload: { parentId?: string | null; type: NodeType; title: string; html?: string }) =>
+  create: (payload: { parentId?: string | null; scope?: 'personal' | 'public'; type: NodeType; title: string; html?: string }) =>
     api.post<DocNode>('/nodes', payload).then(r => r.data),
   get: (id: string) =>
     api.get<{ node: DocNode; files?: string[] }>(`/nodes/${id}`).then(r => r.data),
   update: (id: string, payload: Partial<{ title: string; parentId: string | null; visibility: string; entryFile: string }>) =>
     api.patch<DocNode>(`/nodes/${id}`, payload).then(r => r.data),
   remove: (id: string) => api.delete(`/nodes/${id}`).then(r => r.data),
+  info: (id: string) => api.get<{ node: NodeInfo }>(`/nodes/${id}/info`).then(r => r.data.node),
+  getLock: (id: string) => api.get<{ lock: NodeLockInfo }>(`/nodes/${id}/lock`).then(r => r.data.lock),
+  acquireLock: (id: string) => api.post<{ lock: NodeLockInfo }>(`/nodes/${id}/lock`).then(r => r.data.lock),
+  releaseLock: (id: string) => api.delete(`/nodes/${id}/lock`).then(r => r.data),
+}
+
+export const PublicDocs = {
+  get: (id: string) =>
+    axios.get<{ node: DocNode; files?: string[] }>(prefixed(`/api/public/docs/${id}`)).then(r => r.data),
 }
 
 export interface UploadZipResult {
@@ -106,10 +161,13 @@ export const Docs = {
     api.get<{ path: string; content: string }>(`/docs/${id}/file`, { params: { path } }).then(r => r.data),
   saveFile: (id: string, path: string, content: string) =>
     api.post(`/docs/${id}/file`, { path, content }).then(r => r.data),
+  deleteFile: (id: string, path: string) =>
+    api.delete(`/docs/${id}/file`, { params: { path } }).then(r => r.data),
 }
 
 export const Shares = {
   create: (docId: string) => api.post<ShareInfo>(`/docs/${docId}/share`).then(r => r.data),
+  revoke: (docId: string) => api.delete(`/docs/${docId}/share`).then(r => r.data),
   info: (token: string) =>
     api.get<{ share: ShareInfo; doc: DocNode }>(`/shares/${token}`).then(r => r.data),
 }
@@ -162,6 +220,7 @@ export interface AIGenerateParams {
   mode: 'create' | 'rewrite' | 'edit'
   docId?: string
   parentId?: string | null
+  scope?: 'personal' | 'public'
   title?: string
   promptId?: string  // 可选：指定 Prompt 模板
   useTools?: boolean // 可选：覆盖全局设置
@@ -208,7 +267,7 @@ export function aiGenerate(params: AIGenerateParams, handlers: AIGenerateHandler
       })
       if (res.status === 401) {
         setToken(null)
-        window.dispatchEvent(new CustomEvent('webdoc:unauthorized'))
+        window.dispatchEvent(new CustomEvent('doc-hub:unauthorized'))
         handlers.onError?.('请先登录')
         return
       }
@@ -264,6 +323,7 @@ export function aiGenerate(params: AIGenerateParams, handlers: AIGenerateHandler
 export interface ReorderItem {
   id: string
   parentId: string | null
+  scope?: 'personal' | 'public'
   sortOrder: number
 }
 export const NodesReorder = {
@@ -313,4 +373,12 @@ export const Auth = {
   login: (p: { username: string; password: string }) =>
     api.post<{ user: AuthUser; token: string }>('/auth/login', p).then(r => r.data),
   me: () => api.get<{ user: AuthUser }>('/auth/me').then(r => r.data.user),
+  changePassword: (p: { currentPassword: string; newPassword: string }) =>
+    api.patch<{ ok: boolean }>('/auth/password', p).then(r => r.data),
+}
+
+export const AdminUsers = {
+  list: () => api.get<{ users: AuthUser[] }>('/admin/users').then(r => r.data.users),
+  create: (p: { username: string; password: string; email?: string; displayName?: string; role?: 'admin' | 'user' }) =>
+    api.post<{ user: AuthUser }>('/admin/users', p).then(r => r.data.user),
 }

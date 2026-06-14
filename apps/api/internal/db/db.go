@@ -1,7 +1,7 @@
 package db
 
 import (
-	"github.com/xiaofengguo/web-doc/api/internal/model"
+	"doc-hub/api/internal/model"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -9,9 +9,12 @@ import (
 
 // Open 使用 PostgreSQL 打开数据库连接，并自动迁移所需表结构。
 // dsn 例如：
-//   host=localhost user=webdoc password=webdoc dbname=webdoc port=5432 sslmode=disable TimeZone=UTC
+//
+//	host=localhost user=doc-hub password=doc-hub dbname=doc-hub port=5432 sslmode=disable TimeZone=UTC
+//
 // 或 URL 风格：
-//   postgres://webdoc:webdoc@localhost:5432/webdoc?sslmode=disable
+//
+//	postgres://doc-hub:doc-hub@localhost:5432/doc-hub?sslmode=disable
 func Open(dsn string) (*gorm.DB, error) {
 	d, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
@@ -29,7 +32,20 @@ func Open(dsn string) (*gorm.DB, error) {
 	); err != nil {
 		return nil, err
 	}
+	if err := ensureUserEmailIndex(d); err != nil {
+		return nil, err
+	}
+	if err := model.BackfillOwnership(d); err != nil {
+		return nil, err
+	}
 	// 兜底：内置 Prompt 模板（仅首次插入）
 	model.SeedBuiltinPrompts(d)
 	return d, nil
+}
+
+func ensureUserEmailIndex(d *gorm.DB) error {
+	if err := d.Exec(`DROP INDEX IF EXISTS idx_users_email`).Error; err != nil {
+		return err
+	}
+	return d.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_not_empty ON users (email) WHERE email <> '' AND deleted_at IS NULL`).Error
 }

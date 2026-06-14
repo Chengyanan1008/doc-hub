@@ -11,13 +11,32 @@ import { cn } from '@/lib/utils'
 
 type Mode = 'choose' | 'paste' | 'upload-html' | 'upload-zip' | 'folder' | 'pick-entry'
 
+function isPreviewEntry(file: string): boolean {
+  return /\.(html?|md)$/i.test(file)
+}
+
+function isMarkdown(file: string): boolean {
+  return /\.md$/i.test(file)
+}
+
+function safeUploadFileName(name: string): string {
+  const leaf = name.replace(/\\/g, '/').split('/').pop()?.trim() || 'index.md'
+  return leaf.replace(/[?#]/g, '_')
+}
+
+function looksLikeHTML(content: string): boolean {
+  const value = content.trim().toLowerCase()
+  return value.startsWith('<!doctype html') || value.startsWith('<html') || /<\/(html|body|div|section|article|main)>/.test(value)
+}
+
 export function CreateDocDialog({
-  open, onOpenChange, parentId, onAITrigger,
+  open, onOpenChange, parentId, scope = 'personal', onAITrigger,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   parentId: string | null
-  onAITrigger?: (parentId: string | null) => void
+  scope?: 'personal' | 'public'
+  onAITrigger?: (parentId: string | null, scope?: 'personal' | 'public') => void
 }) {
   const { createNode, updateNode, selectDoc } = useDocsStore()
   const [mode, setMode] = useState<Mode>('choose')
@@ -40,34 +59,61 @@ export function CreateDocDialog({
     setBusy(true)
     try {
       if (mode === 'folder') {
-        await createNode({ parentId, type: 'folder', title: title || '新文件夹' })
+        await createNode({ parentId, scope, type: 'folder', title: title || '新文件夹' })
       } else if (mode === 'paste') {
-        await createNode({ parentId, type: 'doc', title: title || '未命名文档', html })
-      } else if (mode === 'upload-html' && file) {
-        const text = await file.text()
+        const isHtml = looksLikeHTML(html)
         await createNode({
           parentId,
+          scope,
           type: 'doc',
-          title: title || file.name.replace(/\.html?$/i, ''),
-          html: text,
+          title: title || '未命名文档',
+          html: isHtml ? html : '',
         })
+        const currentId = useDocsStore.getState().selectedId
+        if (!isHtml && currentId) {
+          await Docs.uploadHTML(currentId, html, 'content.md')
+          await updateNode(currentId, { entryFile: 'content.md' })
+          await Docs.deleteFile(currentId, 'index.html').catch(() => {})
+        }
+      } else if (mode === 'upload-html' && file) {
+        const text = await file.text()
+        const isMd = isMarkdown(file.name)
+        const fileName = isMd ? safeUploadFileName(file.name) : 'index.html'
+        const titlePattern = isMd ? /\.md$/i : /\.html?$/i
+        await createNode({
+          parentId,
+          scope,
+          type: 'doc',
+          title: title || file.name.replace(titlePattern, ''),
+          html: isMd ? '' : text,
+        })
+        const currentId = useDocsStore.getState().selectedId
+        if (isMd && currentId) {
+          await Docs.uploadHTML(currentId, text, fileName)
+          await updateNode(currentId, { entryFile: fileName })
+          await Docs.deleteFile(currentId, 'index.html').catch(() => {})
+        }
       } else if (mode === 'upload-zip' && file) {
         const node = await createNode({
           parentId,
+          scope,
           type: 'doc',
           title: title || file.name.replace(/\.zip$/i, ''),
         })
         const res = await Docs.uploadZip(node.id, file)
         if (res.needsEntry && res.files && res.files.length > 0) {
           // 让用户选入口文件，先停留在 dialog 内
-          // 优先把 .html / .htm 排前面
+          // 优先把 .html / .htm / .md 这些可预览入口排前面
           const sorted = [...res.files].sort((a, b) => {
-            const ah = /\.html?$/i.test(a) ? 0 : 1
-            const bh = /\.html?$/i.test(b) ? 0 : 1
+            const ah = isPreviewEntry(a) ? 0 : 1
+            const bh = isPreviewEntry(b) ? 0 : 1
             if (ah !== bh) return ah - bh
+            const aw = /^index\.(html?|md)$/i.test(a) ? 0 : /^readme\.md$/i.test(a) ? 1 : 2
+            const bw = /^index\.(html?|md)$/i.test(b) ? 0 : /^readme\.md$/i.test(b) ? 1 : 2
+            if (aw !== bw) return aw - bw
             return a.localeCompare(b)
           })
-          const firstHTML = sorted.find((f) => /\.html?$/i.test(f)) ?? sorted[0]
+          const firstHTML = sorted.find(isPreviewEntry) ?? sorted[0]
           setPickFiles(sorted)
           setPickDocId(node.id)
           setPickValue(firstHTML)
@@ -110,23 +156,23 @@ export function CreateDocDialog({
           </DialogTitle>
           <DialogDescription>
             {mode === 'pick-entry'
-              ? '上传的压缩包中没有找到 index.html，请从下面选择一个文件作为预览入口。'
-              : (parentId ? '将创建在当前文件夹下' : '将创建在根目录')}
+              ? '上传的压缩包中没有找到默认入口，请从下面选择一个文件作为预览入口。'
+              : `${parentId ? '将创建在当前文件夹下' : '将创建在根目录'}，支持多种内容文件，当前可预览 HTML 和 Markdown。`}
           </DialogDescription>
         </DialogHeader>
 
         {mode === 'choose' && (
           <div className="grid grid-cols-2 gap-3 pt-1">
             <ModeCard icon={<Folder />} title="新建文件夹" desc="组织文档结构" onClick={() => setMode('folder')} />
-            <ModeCard icon={<Code2 />} title="粘贴 HTML" desc="直接粘贴源码创建" onClick={() => setMode('paste')} />
-            <ModeCard icon={<FileUp />} title="上传 .html" desc="单 HTML 文件" onClick={() => setMode('upload-html')} />
-            <ModeCard icon={<Upload />} title="上传 .zip" desc="多文件 HTML 项目" onClick={() => setMode('upload-zip')} />
+            <ModeCard icon={<Code2 />} title="粘贴内容" desc="直接粘贴源码创建" onClick={() => setMode('paste')} />
+            <ModeCard icon={<FileUp />} title="上传单文件" desc="自动识别文件类型" onClick={() => setMode('upload-html')} />
+            <ModeCard icon={<Upload />} title="上传压缩包" desc="多文件静态项目" onClick={() => setMode('upload-zip')} />
             <ModeCard
-              icon={<Sparkles />} title="AI 生成" desc="流式生成精美 HTML"
+              icon={<Sparkles />} title="AI 生成" desc="流式生成内容页面"
               accent
               onClick={() => {
                 onOpenChange(false)
-                setTimeout(() => onAITrigger?.(parentId), 150)
+                setTimeout(() => onAITrigger?.(parentId, scope), 150)
               }}
             />
           </div>
@@ -146,7 +192,7 @@ export function CreateDocDialog({
               value={html}
               onChange={(e) => setHtml(e.target.value)}
               rows={10}
-              placeholder={'<!doctype html>\n<html>...</html>'}
+              placeholder={'粘贴 HTML 或 Markdown 内容'}
               className="font-mono text-xs"
             />
           </div>
@@ -155,25 +201,26 @@ export function CreateDocDialog({
         {mode === 'upload-html' && (
           <div className="space-y-3">
             <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="文档标题（可选，留空使用文件名）" />
-            <FilePicker accept=".html,.htm" file={file} onFile={setFile} hint="选择一个 HTML 文件" />
+            <FilePicker accept=".html,.htm,.md" file={file} onFile={setFile} hint="选择一个支持的单文件" />
           </div>
         )}
 
         {mode === 'upload-zip' && (
           <div className="space-y-3">
             <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="文档标题（可选，留空使用文件名）" />
-            <FilePicker accept=".zip" file={file} onFile={setFile} hint="选择一个 ZIP（包含 index.html 入口）" />
+            <FilePicker accept=".zip" file={file} onFile={setFile} hint="选择一个 ZIP 压缩包" />
           </div>
         )}
 
         {mode === 'pick-entry' && (
           <div className="space-y-2">
             <div className="text-xs text-muted-foreground">
-              共 {pickFiles.length} 个文件，HTML 文件优先排在前面：
+              共 {pickFiles.length} 个文件，可预览入口文件优先排在前面：
             </div>
             <div className="max-h-72 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
               {pickFiles.map((f) => {
                 const isHtml = /\.html?$/i.test(f)
+                const isMd = isMarkdown(f)
                 const active = f === pickValue
                 return (
                   <button
@@ -185,9 +232,10 @@ export function CreateDocDialog({
                       active ? 'bg-primary/10 text-primary' : 'hover:bg-accent/40',
                     )}
                   >
-                    <FileText className={cn('h-3.5 w-3.5 shrink-0', isHtml ? 'text-primary' : 'text-muted-foreground')} />
+                    <FileText className={cn('h-3.5 w-3.5 shrink-0', (isHtml || isMd) ? 'text-primary' : 'text-muted-foreground')} />
                     <span className="truncate">{f}</span>
                     {isHtml && <span className="ml-auto text-[10px] rounded bg-primary/10 text-primary px-1.5 py-0.5">HTML</span>}
+                    {isMd && <span className="ml-auto text-[10px] rounded bg-primary/10 text-primary px-1.5 py-0.5">MD</span>}
                   </button>
                 )
               })}

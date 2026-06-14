@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils'
 interface Props {
   doc: DocNode
   filePath: string
+  readOnly?: boolean
+  readOnlyReason?: string
   /** 外部触发重拉文件内容（如 WebSocket reload、AI 流式写入） */
   externalReloadKey?: number
   onSavedExternally?: () => void  // 保存成功后触发预览刷新
@@ -30,7 +32,7 @@ function inferLang(path: string): string {
   }
 }
 
-export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally }: Props) {
+export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalReloadKey, onSavedExternally }: Props) {
   const [content, setContent] = useState('')
   const [status, setStatus] = useState<Status>('loading')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -68,6 +70,7 @@ export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally
   }, [externalReloadKey])
 
   const save = async () => {
+    if (readOnly) return
     if (!dirtyRef.current && status !== 'dirty') return
     setStatus('saving')
     try {
@@ -100,7 +103,7 @@ export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally
         </div>
         <button
           onClick={save}
-          disabled={status === 'saving' || status === 'loading'}
+          disabled={readOnly || status === 'saving' || status === 'loading'}
           className={cn(
             'inline-flex items-center gap-1 rounded px-2 py-0.5 transition-colors',
             'hover:bg-accent disabled:opacity-50',
@@ -109,6 +112,11 @@ export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally
           <Save className="h-3 w-3" /> 保存 <kbd className="ml-1 text-[10px] opacity-60">⌘S</kbd>
         </button>
       </div>
+      {readOnly && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200">
+          {readOnlyReason || '当前文档正被其他用户编辑，已切换为只读。'}
+        </div>
+      )}
 
       <div className="flex-1 min-h-0">
         <Editor
@@ -117,6 +125,7 @@ export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally
           language={inferLang(filePath)}
           value={content}
           onChange={(v) => {
+            if (readOnly) return
             setContent(v ?? '')
             dirtyRef.current = true
             setStatus('dirty')
@@ -129,6 +138,7 @@ export function CodeEditor({ doc, filePath, externalReloadKey, onSavedExternally
             wordWrap: 'on',
             tabSize: 2,
             automaticLayout: true,
+            readOnly,
             padding: { top: 8 },
             renderLineHighlight: 'gutter',
             smoothScrolling: true,

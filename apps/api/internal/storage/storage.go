@@ -20,6 +20,11 @@ var allowedExt = map[string]bool{
 	".xml": true, ".csv": true,
 }
 
+const (
+	MaxZipFiles        = 2000
+	MaxZipExpandedSize = 200 * 1024 * 1024
+)
+
 type Storage struct {
 	Root string
 }
@@ -79,6 +84,25 @@ func (s *Storage) WriteFile(docID, sub string, data []byte) error {
 	return os.WriteFile(full, data, 0o644)
 }
 
+// RemoveFile 删除文档下的单个文件（带安全校验）。
+func (s *Storage) RemoveFile(docID, sub string) error {
+	if !checkExt(sub) {
+		return fmt.Errorf("file extension not allowed: %s", sub)
+	}
+	full, err := s.ResolveSafe(docID, sub)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("cannot delete directory: %s", sub)
+	}
+	return os.Remove(full)
+}
+
 // ExtractZip 解压 zip 到文档目录（带白名单与穿越保护）。
 // 返回值 hasIndex 指示解压后顶层是否存在 index.html。
 func (s *Storage) ExtractZip(docID string, r io.ReaderAt, size int64) (bool, error) {
@@ -95,6 +119,8 @@ func (s *Storage) ExtractZip(docID string, r io.ReaderAt, size int64) (bool, err
 		return false, err
 	}
 	hasIndex := false
+	fileCount := 0
+	var expandedSize uint64
 	for _, f := range zr.File {
 		// 跳过 macOS 元数据
 		if strings.HasPrefix(f.Name, "__MACOSX/") || strings.HasSuffix(f.Name, ".DS_Store") {
@@ -105,6 +131,14 @@ func (s *Storage) ExtractZip(docID string, r io.ReaderAt, size int64) (bool, err
 		}
 		if !checkExt(f.Name) {
 			continue
+		}
+		fileCount++
+		if fileCount > MaxZipFiles {
+			return false, fmt.Errorf("zip contains too many files, max %d", MaxZipFiles)
+		}
+		expandedSize += uint64(f.UncompressedSize64)
+		if expandedSize > MaxZipExpandedSize {
+			return false, fmt.Errorf("zip expanded size exceeds %d MB", MaxZipExpandedSize/1024/1024)
 		}
 		full, err := s.ResolveSafe(docID, f.Name)
 		if err != nil {

@@ -1,64 +1,55 @@
+name: doc-hub
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: web-doc-postgres
+    container_name: doc-hub-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: webdoc
-      POSTGRES_PASSWORD: webdoc
-      POSTGRES_DB: webdoc
+      POSTGRES_USER: doc-hub
+      POSTGRES_PASSWORD: doc-hub
+      POSTGRES_DB: doc-hub
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U webdoc -d webdoc"]
+      test: ["CMD-SHELL", "pg_isready -U doc-hub -d doc-hub"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # 默认不暴露端口；如需本机连接调试，取消下方注释
-    # ports:
-    #   - "5432:5432"
 
   server:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # 与 nginx 反代前缀保持一致；如直接挂在域名根下，改为 "/"。
-        VITE_BASE: "/doc/"
-    image: uswccr.ccs.tencentyun.com/xiaofeng/web-doc:latest
-    container_name: web-doc-server
+        VITE_BASE: "/"
+    image: doc-hub:latest
+    container_name: doc-hub-server
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      WEBDOC_ADDR: ":8787"
-      WEBDOC_STORAGE: "/data/docs"
-      WEBDOC_WEB_ROOT: "/app/web"
-      WEBDOC_ORIGIN: "*"
-      WEBDOC_PG_HOST: "postgres"
-      WEBDOC_PG_PORT: "5432"
-      WEBDOC_PG_USER: "webdoc"
-      WEBDOC_PG_PASSWORD: "webdoc"
-      WEBDOC_PG_DB: "webdoc"
-      WEBDOC_PG_SSLMODE: "disable"
+      DOC_HUB_ADDR: ":8787"
+      DOC_HUB_STORAGE: "/data/docs"
+      DOC_HUB_WEB_ROOT: "/app/web"
+      DOC_HUB_ORIGIN: "${DOC_HUB_ORIGIN:-http://localhost:8787,http://127.0.0.1:8787}"
+      DOC_HUB_JWT_SECRET: "${DOC_HUB_JWT_SECRET:-change-this-internal-secret-before-sharing}"
+      DOC_HUB_DISABLE_REGISTER: "${DOC_HUB_DISABLE_REGISTER:-0}"
+      DOC_HUB_SHARE_TTL_HOURS: "${DOC_HUB_SHARE_TTL_HOURS:-720}"
+      DOC_HUB_PG_HOST: "postgres"
+      DOC_HUB_PG_PORT: "5432"
+      DOC_HUB_PG_USER: "doc-hub"
+      DOC_HUB_PG_PASSWORD: "doc-hub"
+      DOC_HUB_PG_DB: "doc-hub"
+      DOC_HUB_PG_SSLMODE: "disable"
     volumes:
       - docs:/data/docs
     ports:
-      - "8787:8787"
-
-  nginx:
-    image: nginx:1.27-alpine
-    container_name: web-doc-nginx
-    restart: unless-stopped
-    depends_on:
-      - server
-    ports:
-      - "80:80"
-    volumes:
-      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - "${DOC_HUB_BIND_ADDR:-127.0.0.1}:${DOC_HUB_PORT:-8787}:8787"
 
 volumes:
   pgdata:
+    name: doc-hub_pgdata
   docs:
+    name: doc-hub_docs

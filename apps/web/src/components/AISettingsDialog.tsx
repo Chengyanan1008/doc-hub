@@ -53,8 +53,8 @@ export function AISettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
+      <DialogContent className="flex h-[min(720px,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[min(64rem,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 border-b border-border/60 px-6 pb-3 pt-5 pr-14">
           <DialogTitle className="flex items-center gap-2">
             <Wand2 className="h-5 w-5 text-violet-400" /> AI 设置
           </DialogTitle>
@@ -65,15 +65,15 @@ export function AISettingsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={tab} onValueChange={(v) => setTab(v as any)}>
-          <TabsList className="w-full justify-start">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="min-h-0 flex-1 flex flex-col px-6 py-4">
+          <TabsList className="w-full shrink-0 justify-start overflow-x-auto">
             <TabsTrigger value="connection">连接 / 模型</TabsTrigger>
             <TabsTrigger value="skills">Skill 管理</TabsTrigger>
             <TabsTrigger value="mcp">MCP 接入</TabsTrigger>
           </TabsList>
 
           {/* ---------------- 连接 ---------------- */}
-          <TabsContent value="connection" className="space-y-4 py-3">
+          <TabsContent value="connection" className="min-h-0 flex-1 space-y-4 overflow-y-auto py-3 pr-2">
             <div>
               <label className="text-xs text-muted-foreground mb-1.5 block">服务商预设</label>
               <div className="flex flex-wrap gap-1.5">
@@ -144,17 +144,17 @@ export function AISettingsDialog({
           </TabsContent>
 
           {/* ---------------- Skill 管理（即 Prompt 模板） ---------------- */}
-          <TabsContent value="skills" className="py-3">
+          <TabsContent value="skills" className="min-h-0 flex-1 overflow-y-auto py-3 pr-2">
             <PromptManager />
           </TabsContent>
 
           {/* ---------------- MCP 接入 ---------------- */}
-          <TabsContent value="mcp" className="py-3">
+          <TabsContent value="mcp" className="min-h-0 flex-1 overflow-y-auto py-3 pr-2">
             <MCPPanel />
           </TabsContent>
         </Tabs>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t border-border/60 px-6 pb-5 pt-3">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>关闭</Button>
           {tab === 'connection' && (
             <Button variant="gradient" onClick={save} disabled={busy}>
@@ -260,7 +260,7 @@ function PromptManager() {
   }
 
   return (
-    <div className="grid grid-cols-[220px_1fr] gap-3 h-[480px] min-h-0">
+    <div className="grid h-full min-h-[360px] grid-cols-[220px_1fr] gap-3">
       {/* 列表 */}
       <div className="border border-border/60 rounded-md overflow-hidden flex flex-col min-h-0">
         <div className="p-2 border-b border-border/60 flex items-center gap-1">
@@ -437,7 +437,7 @@ function MCPPanel() {
   // Cursor / Claude Desktop / Cline 配置示例：使用 mcp-remote 桥接
   const remoteJSON = JSON.stringify({
     mcpServers: {
-      'web-doc': {
+      'doc-hub': {
         command: 'npx',
         args: ['-y', 'mcp-remote', endpoint, '--header', `Authorization: Bearer ${tokenForExample}`],
       },
@@ -447,7 +447,7 @@ function MCPPanel() {
   // 直连（部分客户端原生支持 Streamable HTTP）
   const directJSON = JSON.stringify({
     mcpServers: {
-      'web-doc': {
+      'doc-hub': {
         url: endpoint,
         headers: { Authorization: `Bearer ${tokenForExample}` },
       },
@@ -455,14 +455,14 @@ function MCPPanel() {
   }, null, 2)
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 min-w-0">
       {/* 端点信息 */}
       <div className="rounded-md border border-border/60 p-3">
         <div className="flex items-center gap-2 mb-2">
           <Plug className="h-4 w-4 text-violet-400" />
           <div className="text-sm font-medium">MCP 服务端点</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <code className="flex-1 bg-muted/40 rounded px-2 py-1.5 text-xs font-mono break-all">
             {endpoint}
           </code>
@@ -546,7 +546,7 @@ function MCPPanel() {
               {copied === 'remote' ? <Check /> : <Copy />} 复制
             </Button>
           </div>
-          <pre className="bg-muted/40 rounded p-2 text-[11px] font-mono overflow-auto max-h-48 whitespace-pre">
+          <pre className="bg-muted/40 rounded p-2 text-[11px] font-mono overflow-auto max-h-48 whitespace-pre max-w-full">
 {remoteJSON}
           </pre>
           <div className="text-[10px] text-muted-foreground mt-1">
@@ -563,7 +563,7 @@ function MCPPanel() {
               {copied === 'direct' ? <Check /> : <Copy />} 复制
             </Button>
           </div>
-          <pre className="bg-muted/40 rounded p-2 text-[11px] font-mono overflow-auto max-h-40 whitespace-pre">
+          <pre className="bg-muted/40 rounded p-2 text-[11px] font-mono overflow-auto max-h-40 whitespace-pre max-w-full">
 {directJSON}
           </pre>
         </div>

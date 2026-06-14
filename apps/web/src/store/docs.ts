@@ -2,6 +2,22 @@ import { create } from 'zustand'
 import type { DocNode, ReorderItem } from '@/lib/api'
 import { Nodes, NodesReorder } from '@/lib/api'
 
+const SIDEBAR_KEY = 'doc-hub.sidebarOpen'
+
+function initialSidebarOpen() {
+  if (typeof window === 'undefined') return true
+  const raw = localStorage.getItem(SIDEBAR_KEY)
+  if (raw == null) return true
+  return raw !== 'false'
+}
+
+export function resetSidebarPreference() {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(SIDEBAR_KEY)
+  }
+  useDocsStore.setState({ sidebarOpen: true })
+}
+
 interface DocsState {
   nodes: DocNode[]
   loading: boolean
@@ -14,7 +30,7 @@ interface DocsState {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
 
-  createNode: (payload: { parentId?: string | null; type: 'folder' | 'doc'; title: string; html?: string }) => Promise<DocNode>
+  createNode: (payload: { parentId?: string | null; scope?: 'personal' | 'public'; type: 'folder' | 'doc'; title: string; html?: string }) => Promise<DocNode>
   updateNode: (id: string, patch: Parameters<typeof Nodes.update>[1]) => Promise<void>
   removeNode: (id: string) => Promise<void>
   reorderNodes: (items: ReorderItem[]) => Promise<void>
@@ -26,7 +42,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   loading: false,
   selectedId: null,
   sharedDocIds: [],
-  sidebarOpen: false,
+  sidebarOpen: initialSidebarOpen(),
 
   loadAll: async () => {
     set({ loading: true })
@@ -43,8 +59,15 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   },
 
   selectDoc: (id) => set({ selectedId: id }),
-  toggleSidebar: () => set({ sidebarOpen: !get().sidebarOpen }),
-  setSidebarOpen: (open) => set({ sidebarOpen: open }),
+  toggleSidebar: () => {
+    const open = !get().sidebarOpen
+    if (typeof window !== 'undefined') localStorage.setItem(SIDEBAR_KEY, String(open))
+    set({ sidebarOpen: open })
+  },
+  setSidebarOpen: (open) => {
+    if (typeof window !== 'undefined') localStorage.setItem(SIDEBAR_KEY, String(open))
+    set({ sidebarOpen: open })
+  },
 
   createNode: async (payload) => {
     const node = await Nodes.create(payload)
@@ -81,11 +104,33 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   reorderNodes: async (items) => {
     // 乐观更新
     const map = new Map(items.map((i) => [i.id, i]))
+    const nodes = get().nodes
+    const changedFolderScopes = nodes
+      .filter((n) => n.type === 'folder')
+      .map((n) => ({ node: n, item: map.get(n.id) }))
+      .filter(({ node, item }) => item?.scope && item.scope !== node.scope)
+      .map(({ node, item }) => ({ folderId: node.id, scope: item!.scope! }))
+
+    const isDescendantOf = (node: DocNode, folderId: string) => {
+      let parentId = node.parentId
+      for (let i = 0; i < 100 && parentId; i++) {
+        if (parentId === folderId) return true
+        parentId = nodes.find((n) => n.id === parentId)?.parentId
+      }
+      return false
+    }
+
     set({
-      nodes: get().nodes.map((n) => {
+      nodes: nodes.map((n) => {
         const it = map.get(n.id)
-        if (!it) return n
-        return { ...n, parentId: it.parentId ?? null, sortOrder: it.sortOrder }
+        const inheritedScope = changedFolderScopes.find((c) => isDescendantOf(n, c.folderId))?.scope
+        if (!it) return inheritedScope ? { ...n, scope: inheritedScope } : n
+        return {
+          ...n,
+          parentId: it.parentId ?? null,
+          scope: it.scope ?? inheritedScope ?? n.scope,
+          sortOrder: it.sortOrder,
+        }
       }),
     })
     try {

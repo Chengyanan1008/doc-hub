@@ -7,6 +7,31 @@ import (
 	"gorm.io/gorm"
 )
 
+// BackfillOwnership assigns legacy rows without an owner to the first admin
+// account, or the first user if no admin exists yet. Fresh databases are a no-op.
+func BackfillOwnership(db *gorm.DB) error {
+	var u User
+	if err := db.Order("case when role = 'admin' then 0 else 1 end, created_at asc").
+		First(&u).Error; err != nil {
+		return nil
+	}
+	for _, m := range []any{&Node{}, &AISettings{}, &MCPToken{}, &PromptTemplate{}} {
+		if err := db.Model(m).Where("owner_id = '' OR owner_id IS NULL").Update("owner_id", u.ID).Error; err != nil {
+			return err
+		}
+	}
+	if err := db.Model(&Node{}).Where("scope = '' OR scope IS NULL").Update("scope", "personal").Error; err != nil {
+		return err
+	}
+	if err := db.Model(&Node{}).Where("coalesce(created_by, '') = ''").Update("created_by", gorm.Expr("owner_id")).Error; err != nil {
+		return err
+	}
+	if err := db.Model(&Node{}).Where("coalesce(updated_by, '') = ''").Update("updated_by", gorm.Expr("owner_id")).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
 // SeedBuiltinPrompts 注入内置 Prompt 模板（如已存在则跳过）
 func SeedBuiltinPrompts(db *gorm.DB) {
 	builtins := []PromptTemplate{

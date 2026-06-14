@@ -1,12 +1,38 @@
-import { useEffect, useState } from 'react'
-import { Check, Copy, Link } from 'lucide-react'
-import { Shares, type DocNode } from '@/lib/api'
+import { useEffect, useMemo, useState } from 'react'
+import { Check, ChevronDown, Copy, Globe2, Link, Link2, Lock, ShieldOff } from 'lucide-react'
+import { Nodes, Shares, type DocNode } from '@/lib/api'
 import { copyToClipboard } from '@/lib/utils'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+
+type AccessMode = 'off' | 'link' | 'public'
+
+const accessCopy: Record<AccessMode, { label: string; hint: string; urlLabel: string; detail: string }> = {
+  off: {
+    label: '未开启',
+    hint: '未登录用户不能查看；已有分享链接会被撤销。',
+    urlLabel: '未开启',
+    detail: '只有登录后的文档所有者可以查看。',
+  },
+  link: {
+    label: '获得链接的人',
+    hint: '生成一条带随机 token 的分享链接，拿到链接的人可查看。',
+    urlLabel: '分享链接',
+    detail: '链接形如 /s/随机token。撤销后，这条分享链接立即失效；文档原地址仍不对未登录用户开放。',
+  },
+  public: {
+    label: '互联网公开',
+    hint: '文档原地址公开，任何知道地址的人都可以查看。',
+    urlLabel: '公开地址',
+    detail: '链接形如 /v/文档ID。不依赖随机 token，适合放到官网、群公告或外网长期传播。',
+  },
+}
 
 export function ShareDialog({
   doc, open, onOpenChange,
@@ -15,33 +41,61 @@ export function ShareDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
+  const [mode, setMode] = useState<AccessMode>('off')
   const [token, setToken] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    if (open && doc) {
-      Shares.create(doc.id).then((s) => setToken(s.token))
-    } else {
-      setToken(null); setCopied(false)
-    }
+    if (!open || !doc) return
+    setMode(doc.visibility === 'public' ? 'public' : 'off')
+    setToken(null)
+    setCopied(false)
+    setSaving(false)
   }, [open, doc])
 
-  // 默认分享链接：/s/:token 打开后会自动跳转到 /v/:docId（带完整主站外壳）。
-  // 访问者如需隐藏主站顶部和左侧菜单，可使用 ?fullscreen 链接（仍然是 React 外壳 + iframe，仅视觉隐藏菜单）。
-  // 注意：必须拼上 Vite 构建时的 BASE_URL（如 /doc/），否则在反向代理（nginx 暴露 /doc/）下链接会 404。
   const baseUrl = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
-  const url = token ? `${location.origin}${baseUrl}/s/${token}` : ''
-  const fullscreenUrl = token ? `${location.origin}${baseUrl}/s/${token}?fullscreen=1` : ''
+  const shareUrl = token ? `${location.origin}${baseUrl}/s/${token}` : ''
+  const publicUrl = doc ? `${location.origin}${baseUrl}/v/${doc.id}` : ''
 
-  const copy = async (target: string) => {
-    if (!target) return
-    const ok = await copyToClipboard(target)
+  const activeUrl = useMemo(() => {
+    if (mode === 'link') return shareUrl
+    if (mode === 'public') return publicUrl
+    return ''
+  }, [mode, publicUrl, shareUrl])
+
+  const setAccess = async (next: AccessMode) => {
+    if (!doc || next === mode) return
+    setSaving(true)
+    try {
+      if (next === 'off') {
+        await Shares.revoke(doc.id)
+        await Nodes.update(doc.id, { visibility: 'private' })
+        setToken(null)
+      } else if (next === 'link') {
+        const s = await Shares.create(doc.id)
+        await Nodes.update(doc.id, { visibility: 'private' })
+        setToken(s.token)
+      } else {
+        await Shares.revoke(doc.id)
+        await Nodes.update(doc.id, { visibility: 'public' })
+        setToken(null)
+      }
+      setMode(next)
+      setCopied(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const copy = async () => {
+    if (!activeUrl) return
+    const ok = await copyToClipboard(activeUrl)
     if (ok) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1600)
     } else {
-      // 兜底：复制失败时提示用户手动选中复制（多见于非 HTTPS 站点 + 浏览器禁用了 execCommand）
-      window.prompt('复制失败，请手动按 Ctrl/Cmd+C 复制：', target)
+      window.prompt('复制失败，请手动按 Ctrl/Cmd+C 复制：', activeUrl)
     }
   }
 
@@ -54,27 +108,73 @@ export function ShareDialog({
             分享 "{doc?.title}"
           </DialogTitle>
           <DialogDescription>
-            通过链接分享这个文档，访问者无需登录即可查看。
+            设置未登录访问权限，并复制对应链接。
           </DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-2 pt-2">
-          <Input value={url} readOnly placeholder="生成中…" className="font-mono text-xs" />
-          <Button onClick={() => copy(url)} disabled={!url} variant={copied ? 'default' : 'gradient'}>
-            {copied ? <><Check /> 已复制</> : <><Copy /> 复制</>}
-          </Button>
+
+        <div className="space-y-3 pt-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-full bg-primary/15 text-primary flex items-center justify-center">
+                <Link2 className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="text-sm font-medium">链接分享</div>
+                <div className="text-xs text-muted-foreground">{accessCopy[mode].hint}</div>
+              </div>
+            </div>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" disabled={saving} className="min-w-36 justify-between">
+                  {accessCopy[mode].label}
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem onSelect={() => setAccess('off')}>
+                  <ShieldOff className="h-4 w-4" />
+                  未开启
+                  {mode === 'off' && <Check className="ml-auto h-4 w-4" />}
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setAccess('link')}>
+                  <Lock className="h-4 w-4" />
+                  获得链接的人
+                  {mode === 'link' && <Check className="ml-auto h-4 w-4" />}
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setAccess('public')}>
+                  <Globe2 className="h-4 w-4" />
+                  互联网公开
+                  {mode === 'public' && <Check className="ml-auto h-4 w-4" />}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Input
+              value={activeUrl}
+              readOnly
+              placeholder={mode === 'off' ? '未开启未登录访问' : '生成中...'}
+              className="font-mono text-xs"
+            />
+            <Button onClick={copy} disabled={!activeUrl || saving} variant={copied ? 'default' : 'gradient'}>
+              {copied ? <><Check /> 已复制</> : <><Copy /> 复制</>}
+            </Button>
+          </div>
+
+          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <span className="text-xs font-medium text-muted-foreground">当前链接类型</span>
+              <span className="rounded bg-background px-2 py-0.5 text-xs text-foreground">
+                {accessCopy[mode].urlLabel}
+              </span>
+            </div>
+            <div className="text-xs leading-relaxed text-muted-foreground">
+              {accessCopy[mode].detail}
+            </div>
+          </div>
         </div>
-        <p className="text-xs text-muted-foreground pt-1">
-          默认链接：访问者会看到完整的文档站（顶部＋左侧菜单）。
-        </p>
-        <div className="flex items-center gap-2 pt-2">
-          <Input value={fullscreenUrl} readOnly placeholder="生成中…" className="font-mono text-xs" />
-          <Button onClick={() => copy(fullscreenUrl)} disabled={!fullscreenUrl} variant="outline">
-            <Copy /> 复制
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground pt-1">
-          全屏链接（?fullscreen）：隐藏主站顶部和左侧菜单，只展示文档内容（仍保留 iframe 隔离）。
-        </p>
       </DialogContent>
     </Dialog>
   )

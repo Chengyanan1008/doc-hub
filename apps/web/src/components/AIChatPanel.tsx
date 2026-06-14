@@ -245,7 +245,7 @@ export function AIChatPanel({ doc, onClose, onOpenSettings }: Props) {
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={isFirst
-            ? '描述你想要的 HTML 文档…\n例如：做一份关于 XX 的精美单页'
+            ? '描述你想要的文档或页面…\n例如：做一份关于 XX 的精美单页'
             : '继续告诉 AI 你想怎么改…'}
           disabled={running}
           className="resize-none text-sm"

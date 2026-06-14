@@ -15,14 +15,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/xiaofengguo/web-doc/api/internal/ai"
-	"github.com/xiaofengguo/web-doc/api/internal/model"
+	"doc-hub/api/internal/ai"
+	"doc-hub/api/internal/model"
 )
 
 // ===================== AI 设置 =====================
 
 func (h *Handler) GetAISettings(c *gin.Context) {
-	s := h.loadOrInitSettings()
+	ownerID := getLocal(c, "userID")
+	s := h.loadOrInitSettings(ownerID)
 	masked := s
 	if masked.APIKey != "" {
 		masked.APIKey = maskKey(masked.APIKey)
@@ -31,11 +32,11 @@ func (h *Handler) GetAISettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"settings": masked, "configured": configured})
 }
 
-func (h *Handler) loadOrInitSettings() model.AISettings {
+func (h *Handler) loadOrInitSettings(ownerID string) model.AISettings {
 	var s model.AISettings
-	if err := h.DB.First(&s, "id = ?", 1).Error; err != nil {
+	if err := h.DB.First(&s, "owner_id = ?", ownerID).Error; err != nil {
 		s = model.AISettings{
-			ID:                 1,
+			OwnerID:            ownerID,
 			Provider:           "openai",
 			BaseURL:            "https://api.openai.com/v1",
 			Model:              "gpt-4o-mini",
@@ -79,14 +80,15 @@ type updateAIReq struct {
 }
 
 func (h *Handler) UpdateAISettings(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	var req updateAIReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, err.Error())
 		return
 	}
 	var s model.AISettings
-	if err := h.DB.First(&s, "id = ?", 1).Error; err != nil {
-		s = model.AISettings{ID: 1}
+	if err := h.DB.First(&s, "owner_id = ?", ownerID).Error; err != nil {
+		s = model.AISettings{OwnerID: ownerID}
 	}
 	if req.Provider != nil {
 		s.Provider = *req.Provider
@@ -144,8 +146,11 @@ func maskKey(k string) string {
 // ===================== Prompt 模板管理 =====================
 
 func (h *Handler) ListPrompts(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	scene := c.Query("scene") // 可选过滤
-	q := h.DB.Model(&model.PromptTemplate{}).Order("builtin desc, is_default desc, updated_at desc")
+	q := h.DB.Model(&model.PromptTemplate{}).
+		Where("builtin = ? OR owner_id = ?", true, ownerID).
+		Order("builtin desc, is_default desc, updated_at desc")
 	if scene != "" {
 		q = q.Where("scene = ?", scene)
 	}
@@ -165,6 +170,7 @@ type promptUpsertReq struct {
 }
 
 func (h *Handler) CreatePrompt(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	var req promptUpsertReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, err.Error())
@@ -179,6 +185,7 @@ func (h *Handler) CreatePrompt(c *gin.Context) {
 	}
 	p := model.PromptTemplate{
 		ID:        model.NewPromptID(),
+		OwnerID:   ownerID,
 		Name:      req.Name,
 		Scene:     req.Scene,
 		Content:   req.Content,
@@ -189,7 +196,7 @@ func (h *Handler) CreatePrompt(c *gin.Context) {
 	}
 	if req.IsDefault {
 		// 把同 scene 其他默认置为 false
-		h.DB.Model(&model.PromptTemplate{}).Where("scene = ?", req.Scene).Update("is_default", false)
+		h.DB.Model(&model.PromptTemplate{}).Where("scene = ? AND (builtin = ? OR owner_id = ?)", req.Scene, true, ownerID).Update("is_default", false)
 	}
 	if err := h.DB.Create(&p).Error; err != nil {
 		serverError(c, err)
@@ -199,9 +206,10 @@ func (h *Handler) CreatePrompt(c *gin.Context) {
 }
 
 func (h *Handler) UpdatePrompt(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	id := c.Param("id")
 	var p model.PromptTemplate
-	if err := h.DB.First(&p, "id = ?", id).Error; err != nil {
+	if err := h.DB.First(&p, "id = ? AND (builtin = ? OR owner_id = ?)", id, true, ownerID).Error; err != nil {
 		notFound(c)
 		return
 	}
@@ -221,7 +229,7 @@ func (h *Handler) UpdatePrompt(c *gin.Context) {
 		p.Content = req.Content
 	}
 	if req.IsDefault {
-		h.DB.Model(&model.PromptTemplate{}).Where("scene = ? AND id <> ?", p.Scene, p.ID).Update("is_default", false)
+		h.DB.Model(&model.PromptTemplate{}).Where("scene = ? AND id <> ? AND (builtin = ? OR owner_id = ?)", p.Scene, p.ID, true, ownerID).Update("is_default", false)
 		p.IsDefault = true
 	} else {
 		p.IsDefault = false
@@ -235,9 +243,10 @@ func (h *Handler) UpdatePrompt(c *gin.Context) {
 }
 
 func (h *Handler) DeletePrompt(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	id := c.Param("id")
 	var p model.PromptTemplate
-	if err := h.DB.First(&p, "id = ?", id).Error; err != nil {
+	if err := h.DB.First(&p, "id = ? AND owner_id = ?", id, ownerID).Error; err != nil {
 		notFound(c)
 		return
 	}
@@ -258,6 +267,7 @@ type aiGenerateReq struct {
 	Prompt   string  `json:"prompt"`
 	DocID    string  `json:"docId"`    // 复用已有文档（重写/迭代）
 	ParentID *string `json:"parentId"` // 新建到指定文件夹
+	Scope    string  `json:"scope"`    // personal | public
 	Title    string  `json:"title"`    // 新建文档标题
 	Mode     string  `json:"mode"`     // create | rewrite | edit
 	PromptID string  `json:"promptId"` // 可选：使用指定 PromptTemplate
@@ -284,7 +294,8 @@ func (h *Handler) AIGenerate(c *gin.Context) {
 		return
 	}
 
-	s := h.loadOrInitSettings()
+	ownerID := getLocal(c, "userID")
+	s := h.loadOrInitSettings(ownerID)
 	if s.APIKey == "" || s.BaseURL == "" || s.Model == "" {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "AI 未配置，请先在设置中填写 BaseURL / APIKey / Model"})
 		return
@@ -294,7 +305,7 @@ func (h *Handler) AIGenerate(c *gin.Context) {
 	var systemPrompt string
 	if req.PromptID != "" {
 		var p model.PromptTemplate
-		if err := h.DB.First(&p, "id = ?", req.PromptID).Error; err == nil {
+		if err := h.DB.First(&p, "id = ? AND (builtin = ? OR owner_id = ?)", req.PromptID, true, ownerID).Error; err == nil {
 			systemPrompt = p.Content
 		}
 	}
@@ -313,8 +324,12 @@ func (h *Handler) AIGenerate(c *gin.Context) {
 	// - 否则按 mode 处理：rewrite/edit 必须传 docId；create 才允许新建。
 	var target model.Node
 	if req.DocID != "" {
-		if err := h.DB.First(&target, "id = ? AND type = 'doc'", req.DocID).Error; err != nil {
+		if err := h.DB.First(&target, "id = ? AND type = 'doc'", req.DocID).Error; err != nil || !h.canWriteNode(ownerID, &target) {
 			notFound(c)
+			return
+		}
+		if err := h.assertNodeLock(ownerID, &target); err != nil {
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error(), "lock": h.lockView(&target)})
 			return
 		}
 	} else if req.Mode == "rewrite" || req.Mode == "edit" {
@@ -325,9 +340,29 @@ func (h *Handler) AIGenerate(c *gin.Context) {
 		if title == "" {
 			title = "AI · " + truncateRune(req.Prompt, 16)
 		}
+		scope := strings.TrimSpace(req.Scope)
+		if scope == "" {
+			scope = "personal"
+		}
+		if scope != "personal" && scope != "public" {
+			badRequest(c, "scope must be personal or public")
+			return
+		}
+		if req.ParentID != nil && *req.ParentID != "" {
+			var parent model.Node
+			if err := h.DB.First(&parent, "id = ? AND type = 'folder'", *req.ParentID).Error; err != nil || !h.canWriteNode(ownerID, &parent) {
+				badRequest(c, "invalid parent")
+				return
+			}
+			scope = h.nodeScope(&parent)
+		}
 		target = model.Node{
 			ID:         uuid.NewString(),
+			OwnerID:    ownerID,
+			CreatedBy:  ownerID,
+			UpdatedBy:  ownerID,
 			ParentID:   req.ParentID,
+			Scope:      scope,
 			Type:       "doc",
 			Title:      title,
 			EntryFile:  "index.html",
@@ -426,6 +461,7 @@ func (h *Handler) AIGenerate(c *gin.Context) {
 
 	// 更新 size
 	target.SizeBytes = h.Storage.DocSize(target.ID)
+	target.UpdatedBy = ownerID
 	h.DB.Save(&target)
 
 	writeEvent("done", gin.H{"docId": target.ID, "bytes": target.SizeBytes})
@@ -690,10 +726,12 @@ func buildEditContextHint(n *model.Node, files []string) string {
 type reorderItem struct {
 	ID        string  `json:"id"`
 	ParentID  *string `json:"parentId"` // null 或 "" 表示根
+	Scope     string  `json:"scope"`    // 移到根目录时使用：personal | public
 	SortOrder int     `json:"sortOrder"`
 }
 
 func (h *Handler) ReorderNodes(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	var req struct {
 		Items []reorderItem `json:"items"`
 	}
@@ -703,21 +741,51 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	}
 	tx := h.DB.Begin()
 	for _, it := range req.Items {
+		var node model.Node
+		if err := tx.First(&node, "id = ?", it.ID).Error; err != nil || !h.canWriteNode(ownerID, &node) {
+			tx.Rollback()
+			notFound(c)
+			return
+		}
 		var parentID *string
+		scope := h.nodeScope(&node)
 		if it.ParentID != nil && *it.ParentID != "" {
 			pid := *it.ParentID
 			parentID = &pid
 		}
-		if parentID != nil && (*parentID == it.ID || h.isDescendant(it.ID, *parentID)) {
+		if parentID != nil && (*parentID == it.ID || h.isDescendantAny(it.ID, *parentID)) {
 			tx.Rollback()
 			badRequest(c, "cannot move into self or descendant")
 			return
 		}
+		if parentID != nil {
+			var parent model.Node
+			if err := tx.First(&parent, "id = ? AND type = 'folder'", *parentID).Error; err != nil || !h.canWriteNode(ownerID, &parent) {
+				tx.Rollback()
+				badRequest(c, "invalid parent")
+				return
+			}
+			scope = h.nodeScope(&parent)
+		} else if it.Scope != "" {
+			if it.Scope != "personal" && it.Scope != "public" {
+				tx.Rollback()
+				badRequest(c, "scope must be personal or public")
+				return
+			}
+			scope = it.Scope
+		}
 		if err := tx.Model(&model.Node{}).Where("id = ?", it.ID).
-			Updates(map[string]any{"parent_id": parentID, "sort_order": it.SortOrder}).Error; err != nil {
+			Updates(map[string]any{"parent_id": parentID, "scope": scope, "sort_order": it.SortOrder}).Error; err != nil {
 			tx.Rollback()
 			serverError(c, err)
 			return
+		}
+		if node.Type == "folder" {
+			if err := h.updateDescendantScopeTx(tx, node.ID, scope); err != nil {
+				tx.Rollback()
+				serverError(c, err)
+				return
+			}
 		}
 	}
 	if err := tx.Commit().Error; err != nil {
@@ -727,11 +795,11 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (h *Handler) isDescendant(ancestor, candidate string) bool {
+func (h *Handler) isDescendant(ownerID, ancestor, candidate string) bool {
 	current := candidate
 	for i := 0; i < 100; i++ {
 		var n model.Node
-		if err := h.DB.Select("parent_id").First(&n, "id = ?", current).Error; err != nil {
+		if err := h.DB.Select("parent_id").First(&n, "id = ? AND owner_id = ?", current, ownerID).Error; err != nil {
 			return false
 		}
 		if n.ParentID == nil {
@@ -754,9 +822,14 @@ type saveFileReq struct {
 
 func (h *Handler) SaveFile(c *gin.Context) {
 	id := c.Param("id")
+	ownerID := getLocal(c, "userID")
 	var n model.Node
-	if err := h.DB.First(&n, "id = ? AND type = 'doc'", id).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND type = 'doc'", id).Error; err != nil || !h.canWriteNode(ownerID, &n) {
 		notFound(c)
+		return
+	}
+	if err := h.assertNodeLock(ownerID, &n); err != nil {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error(), "lock": h.lockView(&n)})
 		return
 	}
 	var req saveFileReq
@@ -772,6 +845,7 @@ func (h *Handler) SaveFile(c *gin.Context) {
 		return
 	}
 	n.SizeBytes = h.Storage.DocSize(id)
+	n.UpdatedBy = ownerID
 	h.DB.Save(&n)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "path": req.Path, "size": n.SizeBytes})
 }

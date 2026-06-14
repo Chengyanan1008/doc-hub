@@ -30,6 +30,7 @@ func TestRouteWiring(t *testing.T) {
 	app.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	// 注册一个真实的 GET 路由，用于 CORS preflight 命中
+	app.OPTIONS("/api/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	app.GET("/api/nodes", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"items": []any{}}) })
 
 	// 模拟带 :id/*path 的路由（这是从 fiber 迁过来后路径语法变化最大的一处）

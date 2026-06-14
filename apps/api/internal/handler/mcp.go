@@ -12,7 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/xiaofengguo/web-doc/api/internal/model"
+	"doc-hub/api/internal/model"
 )
 
 // =============================================================================
@@ -36,8 +36,9 @@ func maskToken(t string) string {
 
 // ListMCPTokens 列出所有 MCP Token（脱敏）
 func (h *Handler) ListMCPTokens(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	var rows []model.MCPToken
-	if err := h.DB.Order("created_at desc").Find(&rows).Error; err != nil {
+	if err := h.DB.Where("owner_id = ?", ownerID).Order("created_at desc").Find(&rows).Error; err != nil {
 		serverError(c, err)
 		return
 	}
@@ -53,6 +54,7 @@ func (h *Handler) ListMCPTokens(c *gin.Context) {
 
 // CreateMCPToken 生成一个新 Token（明文仅返回一次）
 func (h *Handler) CreateMCPToken(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -63,6 +65,7 @@ func (h *Handler) CreateMCPToken(c *gin.Context) {
 	tk := "wd_" + randomToken(24) // 48 hex chars + prefix
 	row := model.MCPToken{
 		ID:        uuid.NewString(),
+		OwnerID:   ownerID,
 		Name:      req.Name,
 		Token:     tk,
 		CreatedAt: time.Now(),
@@ -79,8 +82,9 @@ func (h *Handler) CreateMCPToken(c *gin.Context) {
 
 // DeleteMCPToken 删除一个 Token
 func (h *Handler) DeleteMCPToken(c *gin.Context) {
+	ownerID := getLocal(c, "userID")
 	id := c.Param("id")
-	if err := h.DB.Where("id = ?", id).Delete(&model.MCPToken{}).Error; err != nil {
+	if err := h.DB.Where("id = ? AND owner_id = ?", id, ownerID).Delete(&model.MCPToken{}).Error; err != nil {
 		serverError(c, err)
 		return
 	}
@@ -88,22 +92,22 @@ func (h *Handler) DeleteMCPToken(c *gin.Context) {
 }
 
 // authMCP 校验 Bearer Token；命中则更新 LastUsedAt（最佳努力）
-func (h *Handler) authMCP(c *gin.Context) error {
+func (h *Handler) authMCP(c *gin.Context) (string, error) {
 	auth := c.GetHeader("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return errors.New("missing bearer token")
+		return "", errors.New("missing bearer token")
 	}
 	tk := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	if tk == "" {
-		return errors.New("empty token")
+		return "", errors.New("empty token")
 	}
 	var row model.MCPToken
 	if err := h.DB.Where("token = ?", tk).First(&row).Error; err != nil {
-		return errors.New("invalid token")
+		return "", errors.New("invalid token")
 	}
 	now := time.Now()
 	h.DB.Model(&model.MCPToken{}).Where("id = ?", row.ID).Update("last_used_at", &now)
-	return nil
+	return row.OwnerID, nil
 }
 
 // =============================================================================
@@ -113,7 +117,7 @@ func (h *Handler) authMCP(c *gin.Context) error {
 
 const (
 	mcpProtoVersion = "2025-03-26"
-	mcpServerName   = "web-doc"
+	mcpServerName   = "doc-hub"
 	mcpServerVer    = "0.1.0"
 )
 
@@ -146,11 +150,13 @@ func rpcFail(id json.RawMessage, code int, msg string) rpcResponse {
 
 // MCPHandler 处理 POST /mcp
 func (h *Handler) MCPHandler(c *gin.Context) {
-	if err := h.authMCP(c); err != nil {
-		c.Header("WWW-Authenticate", `Bearer realm="web-doc-mcp"`)
+	ownerID, err := h.authMCP(c)
+	if err != nil {
+		c.Header("WWW-Authenticate", `Bearer realm="doc-hub-mcp"`)
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
+	c.Set("mcpOwnerID", ownerID)
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -172,7 +178,7 @@ func (h *Handler) MCPHandler(c *gin.Context) {
 		}
 		out := make([]rpcResponse, 0, len(batch))
 		for _, r := range batch {
-			if resp, ok := h.dispatchMCP(r); ok {
+			if resp, ok := h.dispatchMCP(c, r); ok {
 				out = append(out, resp)
 			}
 		}
@@ -185,7 +191,7 @@ func (h *Handler) MCPHandler(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	resp, ok := h.dispatchMCP(req)
+	resp, ok := h.dispatchMCP(c, req)
 	if !ok {
 		// notification（无 id）：返回 202
 		c.Status(http.StatusAccepted)
@@ -196,7 +202,7 @@ func (h *Handler) MCPHandler(c *gin.Context) {
 
 // dispatchMCP 路由 MCP 方法。
 // 返回 (response, hasResponse)；通知类请求 (id 为空) 返回 false。
-func (h *Handler) dispatchMCP(req rpcRequest) (rpcResponse, bool) {
+func (h *Handler) dispatchMCP(c *gin.Context, req rpcRequest) (rpcResponse, bool) {
 	hasID := len(req.ID) > 0 && string(req.ID) != "null"
 
 	switch req.Method {
@@ -210,7 +216,7 @@ func (h *Handler) dispatchMCP(req rpcRequest) (rpcResponse, bool) {
 				"name":    mcpServerName,
 				"version": mcpServerVer,
 			},
-			"instructions": "Web-Doc MCP server: 管理 HTML 文档（list/create/read/upload/delete）。文件路径基于文档目录的相对路径，常见入口为 index.html。",
+			"instructions": "Doc-Hub MCP server: 管理文档（list/create/read/upload/delete）。文件路径基于文档目录的相对路径，常见入口为 index.html、index.md 或用户选择的入口文件。",
 		}), true
 
 	case "notifications/initialized", "initialized":
@@ -223,7 +229,7 @@ func (h *Handler) dispatchMCP(req rpcRequest) (rpcResponse, bool) {
 		return rpcOK(req.ID, gin.H{"tools": mcpToolsSpec()}), true
 
 	case "tools/call":
-		return h.mcpToolsCall(req), true
+		return h.mcpToolsCall(c, req), true
 
 	// 未实现的能力（resources/prompts）
 	case "resources/list":
@@ -333,7 +339,7 @@ func mcpToolsSpec() []gin.H {
 // 工具调用执行
 // =============================================================================
 
-func (h *Handler) mcpToolsCall(req rpcRequest) rpcResponse {
+func (h *Handler) mcpToolsCall(c *gin.Context, req rpcRequest) rpcResponse {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -342,7 +348,7 @@ func (h *Handler) mcpToolsCall(req rpcRequest) rpcResponse {
 		return rpcFail(req.ID, -32602, "invalid params: "+err.Error())
 	}
 
-	text, isErr := h.runMCPTool(p.Name, p.Arguments)
+	text, isErr := h.runMCPTool(getLocal(c, "mcpOwnerID"), p.Name, p.Arguments)
 	return rpcOK(req.ID, gin.H{
 		"content": []gin.H{
 			{"type": "text", "text": text},
@@ -351,22 +357,22 @@ func (h *Handler) mcpToolsCall(req rpcRequest) rpcResponse {
 	})
 }
 
-func (h *Handler) runMCPTool(name string, raw json.RawMessage) (string, bool) {
+func (h *Handler) runMCPTool(ownerID, name string, raw json.RawMessage) (string, bool) {
 	switch name {
 	case "list_documents":
-		return h.toolListDocuments()
+		return h.toolListDocuments(ownerID)
 	case "get_document":
-		return h.toolGetDocument(raw)
+		return h.toolGetDocument(ownerID, raw)
 	case "read_document_file":
-		return h.toolReadDocumentFile(raw)
+		return h.toolReadDocumentFile(ownerID, raw)
 	case "create_document":
-		return h.toolCreateDocument(raw)
+		return h.toolCreateDocument(ownerID, raw)
 	case "upload_html":
-		return h.toolUploadHTML(raw)
+		return h.toolUploadHTML(ownerID, raw)
 	case "upload_zip_base64":
-		return h.toolUploadZipB64(raw)
+		return h.toolUploadZipB64(ownerID, raw)
 	case "delete_document":
-		return h.toolDeleteDocument(raw)
+		return h.toolDeleteDocument(ownerID, raw)
 	default:
 		return "unknown tool: " + name, true
 	}
@@ -382,15 +388,15 @@ func toolJSON(v any) string {
 
 func toolErr(msg string) (string, bool) { return msg, true }
 
-func (h *Handler) toolListDocuments() (string, bool) {
+func (h *Handler) toolListDocuments(ownerID string) (string, bool) {
 	var nodes []model.Node
-	if err := h.DB.Order("type desc, sort_order asc, created_at asc").Find(&nodes).Error; err != nil {
+	if err := h.DB.Where("owner_id = ?", ownerID).Order("type desc, sort_order asc, created_at asc").Find(&nodes).Error; err != nil {
 		return toolErr(err.Error())
 	}
 	return toolJSON(gin.H{"items": nodes}), false
 }
 
-func (h *Handler) toolGetDocument(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolGetDocument(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		ID string `json:"id"`
 	}
@@ -401,7 +407,7 @@ func (h *Handler) toolGetDocument(raw json.RawMessage) (string, bool) {
 		return toolErr("id is required")
 	}
 	var n model.Node
-	if err := h.DB.First(&n, "id = ?", p.ID).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND owner_id = ?", p.ID, ownerID).Error; err != nil {
 		return toolErr("not found")
 	}
 	if n.Type == "doc" {
@@ -411,7 +417,7 @@ func (h *Handler) toolGetDocument(raw json.RawMessage) (string, bool) {
 	return toolJSON(gin.H{"node": n}), false
 }
 
-func (h *Handler) toolReadDocumentFile(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolReadDocumentFile(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		ID   string `json:"id"`
 		Path string `json:"path"`
@@ -426,7 +432,7 @@ func (h *Handler) toolReadDocumentFile(raw json.RawMessage) (string, bool) {
 		p.Path = "index.html"
 	}
 	var n model.Node
-	if err := h.DB.First(&n, "id = ? AND type = 'doc'", p.ID).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND owner_id = ? AND type = 'doc'", p.ID, ownerID).Error; err != nil {
 		return toolErr("doc not found")
 	}
 	full, err := h.Storage.ResolveSafe(p.ID, p.Path)
@@ -440,7 +446,7 @@ func (h *Handler) toolReadDocumentFile(raw json.RawMessage) (string, bool) {
 	return toolJSON(gin.H{"path": p.Path, "content": string(data)}), false
 }
 
-func (h *Handler) toolCreateDocument(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolCreateDocument(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		Title    string  `json:"title"`
 		Type     string  `json:"type"`
@@ -461,6 +467,7 @@ func (h *Handler) toolCreateDocument(raw json.RawMessage) (string, bool) {
 	}
 	n := model.Node{
 		ID:         uuid.NewString(),
+		OwnerID:    ownerID,
 		ParentID:   p.ParentID,
 		Type:       p.Type,
 		Title:      p.Title,
@@ -480,7 +487,7 @@ func (h *Handler) toolCreateDocument(raw json.RawMessage) (string, bool) {
 	return toolJSON(n), false
 }
 
-func (h *Handler) toolUploadHTML(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolUploadHTML(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		ID   string `json:"id"`
 		HTML string `json:"html"`
@@ -496,7 +503,7 @@ func (h *Handler) toolUploadHTML(raw json.RawMessage) (string, bool) {
 		p.File = "index.html"
 	}
 	var n model.Node
-	if err := h.DB.First(&n, "id = ? AND type = 'doc'", p.ID).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND owner_id = ? AND type = 'doc'", p.ID, ownerID).Error; err != nil {
 		return toolErr("doc not found")
 	}
 	if err := h.Storage.WriteFile(p.ID, p.File, []byte(p.HTML)); err != nil {
@@ -507,7 +514,7 @@ func (h *Handler) toolUploadHTML(raw json.RawMessage) (string, bool) {
 	return toolJSON(gin.H{"ok": true, "size": n.SizeBytes, "file": p.File}), false
 }
 
-func (h *Handler) toolUploadZipB64(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolUploadZipB64(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		ID     string `json:"id"`
 		ZipB64 string `json:"zipB64"`
@@ -519,7 +526,7 @@ func (h *Handler) toolUploadZipB64(raw json.RawMessage) (string, bool) {
 		return toolErr("id and zipB64 are required")
 	}
 	var n model.Node
-	if err := h.DB.First(&n, "id = ? AND type = 'doc'", p.ID).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND owner_id = ? AND type = 'doc'", p.ID, ownerID).Error; err != nil {
 		return toolErr("doc not found")
 	}
 	// 容忍 data:...;base64, 前缀
@@ -549,7 +556,7 @@ func (h *Handler) toolUploadZipB64(raw json.RawMessage) (string, bool) {
 	}), false
 }
 
-func (h *Handler) toolDeleteDocument(raw json.RawMessage) (string, bool) {
+func (h *Handler) toolDeleteDocument(ownerID string, raw json.RawMessage) (string, bool) {
 	var p struct {
 		ID string `json:"id"`
 	}
@@ -560,11 +567,11 @@ func (h *Handler) toolDeleteDocument(raw json.RawMessage) (string, bool) {
 		return toolErr("id is required")
 	}
 	var n model.Node
-	if err := h.DB.First(&n, "id = ?", p.ID).Error; err != nil {
+	if err := h.DB.First(&n, "id = ? AND owner_id = ?", p.ID, ownerID).Error; err != nil {
 		return toolErr("not found")
 	}
 	if n.Type == "folder" {
-		if err := h.deleteRecursive(p.ID); err != nil {
+		if err := h.deleteRecursive(ownerID, p.ID); err != nil {
 			return toolErr(err.Error())
 		}
 	} else {

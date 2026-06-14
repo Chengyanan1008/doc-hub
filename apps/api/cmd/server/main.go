@@ -10,19 +10,19 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/xiaofengguo/web-doc/api/internal/config"
-	"github.com/xiaofengguo/web-doc/api/internal/db"
-	"github.com/xiaofengguo/web-doc/api/internal/handler"
-	"github.com/xiaofengguo/web-doc/api/internal/storage"
-	"github.com/xiaofengguo/web-doc/api/internal/watcher"
+	"doc-hub/api/internal/config"
+	"doc-hub/api/internal/db"
+	"doc-hub/api/internal/handler"
+	"doc-hub/api/internal/storage"
+	"doc-hub/api/internal/watcher"
 )
 
 func main() {
 	cfg := config.Load()
-	log.Printf("[web-doc] storage dir: %s", cfg.StorageDir)
-	log.Printf("[web-doc] listening:   %s", cfg.Addr)
+	log.Printf("[doc-hub] storage dir: %s", cfg.StorageDir)
+	log.Printf("[doc-hub] listening:   %s", cfg.Addr)
 	if cfg.WebRoot != "" {
-		log.Printf("[web-doc] web root:    %s", cfg.WebRoot)
+		log.Printf("[doc-hub] web root:    %s", cfg.WebRoot)
 	}
 
 	st, err := storage.New(cfg.StorageDir)
@@ -41,6 +41,7 @@ func main() {
 	h := handler.New(d, st, hub)
 	h.JWTSecret = cfg.JWTSecret
 	h.DisableRegister = cfg.DisableRegister
+	h.ShareTTLHours = cfg.ShareTTLHours
 
 	gin.SetMode(gin.ReleaseMode)
 	app := gin.New()
@@ -78,12 +79,24 @@ func main() {
 	app.POST("/api/auth/register", h.AuthRegister)
 	app.POST("/api/auth/login", h.AuthLogin)
 	app.GET("/api/auth/me", h.AuthRequired, h.AuthMe)
+	app.PATCH("/api/auth/password", h.AuthRequired, h.AuthChangePassword)
+
+	app.OPTIONS("/api/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	app.OPTIONS("/mcp", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
 	// API 路由
-	api := app.Group("/api")
+	api := app.Group("/api", h.AuthRequired)
+	admin := api.Group("/admin", h.AdminRequired)
+	admin.GET("/users", h.AdminListUsers)
+	admin.POST("/users", h.AdminCreateUser)
+
 	api.GET("/nodes", h.ListNodes)
 	api.POST("/nodes", h.CreateNode)
 	api.GET("/nodes/:id", h.GetNode)
+	api.GET("/nodes/:id/info", h.GetNodeInfo)
+	api.GET("/nodes/:id/lock", h.GetNodeLock)
+	api.POST("/nodes/:id/lock", h.AcquireNodeLock)
+	api.DELETE("/nodes/:id/lock", h.ReleaseNodeLock)
 	api.PATCH("/nodes/:id", h.UpdateNode)
 	api.DELETE("/nodes/:id", h.DeleteNode)
 
@@ -91,15 +104,16 @@ func main() {
 	api.POST("/docs/:id/zip", h.UploadZip)
 	api.GET("/docs/:id/file", h.GetFileContent)
 	api.POST("/docs/:id/file", h.SaveFile)
+	api.DELETE("/docs/:id/file", h.DeleteFile)
 
 	api.POST("/docs/:id/share", h.CreateShare)
-	api.GET("/shares/:token", h.GetShareInfo)
+	api.DELETE("/docs/:id/share", h.DeleteShare)
 
 	// 节点拖拽排序 / 移动
 	api.PATCH("/nodes/reorder/batch", h.ReorderNodes)
 
 	// AI 设置 + 生成（必须登录）
-	aiGroup := api.Group("/ai", h.AuthRequired)
+	aiGroup := api.Group("/ai")
 	aiGroup.GET("/settings", h.GetAISettings)
 	aiGroup.PATCH("/settings", h.UpdateAISettings)
 	aiGroup.POST("/generate", h.AIGenerate)
@@ -111,13 +125,17 @@ func main() {
 	aiGroup.DELETE("/prompts/:id", h.DeletePrompt)
 
 	// MCP Token 管理（必须登录）
-	mcpAdmin := api.Group("/mcp", h.AuthRequired)
+	mcpAdmin := api.Group("/mcp")
 	mcpAdmin.GET("/tokens", h.ListMCPTokens)
 	mcpAdmin.POST("/tokens", h.CreateMCPToken)
 	mcpAdmin.DELETE("/tokens/:id", h.DeleteMCPToken)
 
 	// MCP Streamable HTTP 端点（JSON-RPC 2.0；通过 Bearer Token 鉴权）
 	app.POST("/mcp", h.MCPHandler)
+
+	// 分享解析保持公开，供 /s/:token 页面使用。
+	app.GET("/api/shares/:token", h.GetShareInfo)
+	app.GET("/api/public/docs/:id", h.GetPublicDocInfo)
 
 	// 静态资源（独立路径，建议生产部署到独立子域名）
 	app.GET("/d/:id/*path", h.ServeDocAsset)
@@ -155,7 +173,7 @@ func splitAndTrim(s string) []string {
 // 当请求的文件不存在时，回落到 index.html，由前端路由处理。
 func mountFrontend(app *gin.Engine, webRoot string) {
 	if _, err := os.Stat(webRoot); err != nil {
-		log.Printf("[web-doc] WARN: web root not found: %v", err)
+		log.Printf("[doc-hub] WARN: web root not found: %v", err)
 		return
 	}
 	indexPath := filepath.Join(webRoot, "index.html")

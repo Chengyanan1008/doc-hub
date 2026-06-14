@@ -1,4 +1,4 @@
-module github.com/xiaofengguo/web-doc/api
+module doc-hub/api
 
 go 1.22
 
