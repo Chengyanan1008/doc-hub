@@ -1,3 +1,4 @@
+## 特别备注：此系统是基于 [https://github.com/IcedSoul/web-doc](https://github.com/IcedSoul/web-doc) 大佬的项目做的二次开发
 # Doc-Hub — 内部文档管理与分享平台
 
 **Language / 语言**: [English](./README.md) · **中文**
