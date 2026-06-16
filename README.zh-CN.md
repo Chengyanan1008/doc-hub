@@ -47,6 +47,16 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - **返回首页**：打开文档后仍可回到首页。
 - **侧栏记忆**：登录后侧栏默认展开；用户手动关闭后会记住，重新登录或清理浏览器数据后恢复默认。
 
+#### HTML页面在线编辑
+<img width="1894" height="588" alt="image" src="https://github.com/user-attachments/assets/fc07da5a-9b62-4e00-88e5-a216dd041dc8" />
+
+#### markdown页面在线编辑
+<img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/17e10067-9c62-4d8c-95b8-b551529daf8a" />
+
+#### 预览页面
+<img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/0fed3b8d-75a2-4ec9-8050-69ce4829feda" />
+
+
 ### 权限与分享
 
 分享权限分三档，逻辑接近飞书文档：
@@ -56,6 +66,7 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - **互联网公开**：生成 `/v/{docId}` 公开访问地址，未登录用户也能看；切回“未开启”即可撤销。
 
 注意：**公共目录不是互联网公开**。公共目录只对已登录用户可见；互联网公开才允许未登录访问。
+<img width="829" height="598" alt="image" src="https://github.com/user-attachments/assets/dd626f85-afb0-4d69-9dff-4888d516e370" />
 
 ### 登录与多用户
 
@@ -66,6 +77,10 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - 管理员可在用户菜单中打开“用户管理”，直接创建普通用户或管理员。
 - 文档、AI 设置、Prompt、MCP Token 按用户隔离。
 - 公共目录内容对所有登录用户可见；个人目录内容只对自己可见。
+##### 用户信息管理
+<img width="385" height="324" alt="image" src="https://github.com/user-attachments/assets/d056b3c2-cbf0-45d8-8219-8af630fa9110" />
+##### 多用户使用 公共目录与个人目录分开，做了权限隔离
+<img width="690" height="451" alt="image" src="https://github.com/user-attachments/assets/5e8bd487-4f70-420f-9a73-16dc5d56d708" />
 
 ### AI 与 MCP
 
@@ -73,6 +88,12 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - 支持 OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter 和自定义兼容网关。
 - 支持 AI 生成新文档、改写当前文档、AI 对话面板、Prompt 模板管理。
 - 内置 MCP Server，Agent 可通过 `POST /mcp` 管理文档。
+##### AI设置
+<img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/492579d5-f874-423b-b7d8-a326c7a72d5b" />
+##### skill设置
+<img width="1108" height="761" alt="image" src="https://github.com/user-attachments/assets/32c9721e-26f6-426b-9390-eb5af81940a5" />
+##### MCP设置
+<img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/01086e10-bc4a-41d3-b2e1-0e2a1f8b64ad" />
 
 ---
 
