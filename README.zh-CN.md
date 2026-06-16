@@ -35,6 +35,8 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - **多文件项目**：支持上传包含 HTML、Markdown 和静态资源的 `.zip`；顶层 `index.html` 会自动作为入口，没有 `index.html` 时可手动选择 `.html` 或 `.md` 入口，例如 `index.md`、`README.md`。
 - **文件信息**：可查看上传/修改用户、精确到秒的时间、目录类型、访问状态、大小、入口文件和编辑锁状态。
 
+<img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/eb961425-f273-479d-89bb-9a63c8394c8a" />
+
 ### 编辑与预览
 
 - **Monaco 编辑器**：支持 `预览`、`分屏`、`代码` 三种模式。
