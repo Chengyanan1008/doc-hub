@@ -76,8 +76,11 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - 管理员可在用户菜单中打开“用户管理”，直接创建普通用户或管理员。
 - 文档、AI 设置、Prompt、MCP Token 按用户隔离。
 - 公共目录内容对所有登录用户可见；个人目录内容只对自己可见。
+
 ##### 用户信息管理
 <img width="385" height="324" alt="image" src="https://github.com/user-attachments/assets/d056b3c2-cbf0-45d8-8219-8af630fa9110" />
+
+
 ##### 多用户使用 公共目录与个人目录分开，做了权限隔离
 <img width="690" height="451" alt="image" src="https://github.com/user-attachments/assets/5e8bd487-4f70-420f-9a73-16dc5d56d708" />
 
