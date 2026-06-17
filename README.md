@@ -92,8 +92,10 @@ Doc-Hub 是一个面向内部使用的文档、页面和多文件项目管理平
 - 内置 MCP Server，Agent 可通过 `POST /mcp` 管理文档。
 ##### AI设置
 <img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/492579d5-f874-423b-b7d8-a326c7a72d5b" />
+
 ##### skill设置
 <img width="1108" height="761" alt="image" src="https://github.com/user-attachments/assets/32c9721e-26f6-426b-9390-eb5af81940a5" />
+
 ##### MCP设置
 <img width="1920" height="928" alt="image" src="https://github.com/user-attachments/assets/01086e10-bc4a-41d3-b2e1-0e2a1f8b64ad" />
 
