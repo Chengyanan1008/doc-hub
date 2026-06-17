@@ -24,13 +24,13 @@ const accessCopy: Record<AccessMode, { label: string; hint: string; urlLabel: st
     label: '获得链接的人',
     hint: '生成一条带随机 token 的分享链接，拿到链接的人可查看。',
     urlLabel: '分享链接',
-    detail: '链接形如 /s/随机token。撤销后，这条分享链接立即失效；文档原地址仍不对未登录用户开放。',
+    detail: '链接形如 /s/随机token。撤销后，这条分享链接立即且永久失效。',
   },
   public: {
     label: '互联网公开',
     hint: '文档原地址公开，任何知道地址的人都可以查看。',
     urlLabel: '公开地址',
-    detail: '链接形如 /v/文档ID。不依赖随机 token，适合放到官网、群公告或外网长期传播。',
+    detail: '链接形如 /v/文档ID。不依赖随机 token，撤销后不可查看文档，打开分享可再次查看文档内容，适合放到官网、群公告或外网长期传播。',
   },
 }
 

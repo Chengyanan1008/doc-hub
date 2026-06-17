@@ -42,11 +42,16 @@ function isSafeUrl(url: string): boolean {
   )
 }
 
-function resolveMarkdownAsset(docId: string, markdownPath: string, raw: string): string {
+function resolveMarkdownAsset(
+  docId: string,
+  markdownPath: string,
+  raw: string,
+  params?: Record<string, string | number | undefined>,
+): string {
   if (!raw || !isSafeUrl(raw)) return '#'
   if (/^(https?:|mailto:|#|\/)/i.test(raw)) return raw
   const baseDir = markdownPath.includes('/') ? markdownPath.slice(0, markdownPath.lastIndexOf('/') + 1) : ''
-  return docAssetUrl(docId, `${baseDir}${raw}`)
+  return docAssetUrl(docId, `${baseDir}${raw}`, params)
 }
 
 function escapeHTML(raw: string): string {
@@ -91,20 +96,25 @@ function sanitizeRenderedHTML(html: string): string {
   return template.innerHTML
 }
 
-function renderMarkdown(docId: string, filePath: string, content: string): string {
+export function renderMarkdown(
+  docId: string,
+  filePath: string,
+  content: string,
+  params?: Record<string, string | number | undefined>,
+): string {
   const renderer = new marked.Renderer()
   const defaultLink = renderer.link.bind(renderer)
   const defaultImage = renderer.image.bind(renderer)
 
   renderer.link = ({ href, title, tokens }) => {
-    const safeHref = resolveMarkdownAsset(docId, filePath, href || '')
+    const safeHref = resolveMarkdownAsset(docId, filePath, href || '', params)
     const label = marked.parser([{ type: 'paragraph', raw: '', text: '', tokens }] as any).replace(/^<p>|<\/p>\n?$/g, '')
     const titleAttr = title ? ` title="${title.replace(/"/g, '&quot;')}"` : ''
     return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noreferrer">${label}</a>`
   }
   renderer.image = ({ href, title, text }) => {
     if (!href) return defaultImage({ href, title, text } as any)
-    const safeHref = resolveMarkdownAsset(docId, filePath, href)
+    const safeHref = resolveMarkdownAsset(docId, filePath, href, params)
     const titleAttr = title ? ` title="${title.replace(/"/g, '&quot;')}"` : ''
     return `<img src="${safeHref}" alt="${(text || '').replace(/"/g, '&quot;')}"${titleAttr} />`
   }
