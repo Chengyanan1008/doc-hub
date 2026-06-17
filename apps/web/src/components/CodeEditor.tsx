@@ -41,18 +41,24 @@ export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalRe
 
   // 加载文件（doc/filePath 变化时重新加载）
   useEffect(() => {
+    let stopped = false
     setStatus('loading')
     setErrorMsg(null)
     Docs.fileContent(doc.id, filePath)
       .then((r) => {
+        if (stopped) return
         setContent(r.content)
         dirtyRef.current = false
         setStatus('saved')
       })
       .catch((e) => {
+        if (stopped) return
         setErrorMsg(e?.response?.data?.error ?? '加载失败')
         setStatus('error')
       })
+    return () => {
+      stopped = true
+    }
   }, [doc.id, filePath])
 
   // 外部变动（如 AI 流式写入、文件夹热更新）触发重读。
@@ -60,12 +66,17 @@ export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalRe
   useEffect(() => {
     if (externalReloadKey === undefined) return
     if (dirtyRef.current) return
+    let stopped = false
     Docs.fileContent(doc.id, filePath)
       .then((r) => {
+        if (stopped) return
         setContent(r.content)
         setStatus('saved')
       })
       .catch(() => { /* ignore */ })
+    return () => {
+      stopped = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalReloadKey])
 
