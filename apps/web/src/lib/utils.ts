@@ -40,14 +40,16 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   // 2) Legacy fallback — works on http:// origins as long as it is invoked
   //    inside a user gesture (click handler etc.).
   if (typeof document === 'undefined') return false
+  const value = String(text)
+  const ta = document.createElement('textarea')
   try {
-    const ta = document.createElement('textarea')
-    ta.value = text
+    ta.value = value
     // Avoid scrolling to bottom / flashing on screen
     ta.setAttribute('readonly', '')
+    ta.setAttribute('aria-hidden', 'true')
     ta.style.position = 'fixed'
     ta.style.top = '0'
-    ta.style.left = '0'
+    ta.style.left = '-9999px'
     ta.style.width = '1px'
     ta.style.height = '1px'
     ta.style.padding = '0'
@@ -55,15 +57,29 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     ta.style.outline = 'none'
     ta.style.boxShadow = 'none'
     ta.style.background = 'transparent'
-    ta.style.opacity = '0'
     document.body.appendChild(ta)
-    ta.focus()
+    ta.focus({ preventScroll: true })
     ta.select()
     ta.setSelectionRange(0, ta.value.length)
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
+
+    let copied = false
+    const onCopy = (event: ClipboardEvent) => {
+      event.preventDefault()
+      event.clipboardData?.setData('text/plain', value)
+      copied = true
+    }
+
+    document.addEventListener('copy', onCopy)
+    try {
+      copied = document.execCommand('copy') || copied
+    } finally {
+      document.removeEventListener('copy', onCopy)
+    }
+
+    return copied
   } catch {
     return false
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta)
   }
 }
