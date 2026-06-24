@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { forwardRef, useEffect, useMemo, useState, type UIEventHandler } from 'react'
 import hljs from 'highlight.js/lib/core'
 import bash from 'highlight.js/lib/languages/bash'
 import css from 'highlight.js/lib/languages/css'
@@ -135,15 +135,12 @@ export function renderMarkdown(
   return sanitizeRenderedHTML(html)
 }
 
-export function MarkdownPreview({
-  doc,
-  filePath,
-  reloadKey,
-}: {
+export const MarkdownPreview = forwardRef<HTMLDivElement, {
   doc: DocNode
   filePath: string
   reloadKey: number
-}) {
+  onScroll?: UIEventHandler<HTMLDivElement>
+}>(function MarkdownPreview({ doc, filePath, reloadKey, onScroll }, ref) {
   const [content, setContent] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -171,7 +168,7 @@ export function MarkdownPreview({
   }
 
   return (
-    <div className="absolute inset-0 overflow-auto bg-white text-slate-900">
+    <div ref={ref} onScroll={onScroll} className="absolute inset-0 overflow-auto bg-white text-slate-900">
       <article
         className="mx-auto max-w-4xl px-8 py-10 leading-7
           [&_h1]:mb-5 [&_h1]:mt-0 [&_h1]:border-b [&_h1]:border-slate-200 [&_h1]:pb-3 [&_h1]:text-3xl [&_h1]:font-semibold
@@ -193,4 +190,4 @@ export function MarkdownPreview({
       />
     </div>
   )
-}
+})

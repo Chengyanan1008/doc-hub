@@ -23,6 +23,26 @@ import { cn } from '@/lib/utils'
 /** 外层 URL 用来记录 iframe 内部子路径的 search 参数名 */
 const INNER_PATH_QS = 'p'
 
+type SplitScrollSource = 'editor' | 'preview'
+
+type ScrollMetrics = {
+  top: number
+  height: number
+  viewport: number
+}
+
+function scrollKey(metrics: ScrollMetrics): string {
+  return `${Math.round(metrics.top)}:${Math.round(metrics.height)}:${Math.round(metrics.viewport)}`
+}
+
+type SplitEditorHandle = {
+  getScrollTop: () => number
+  getScrollHeight: () => number
+  getViewportHeight: () => number
+  setScrollTop: (top: number) => void
+  onScroll: (handler: () => void) => () => void
+}
+
 /* -------------------------------------------------------------------------- */
 /* base64url 编解码（UTF-8 安全）                                              */
 /*                                                                            */
@@ -175,6 +195,65 @@ function syncOuterInnerPath(next: string) {
   }
 }
 
+function ratioFromMetrics(metrics: ScrollMetrics): number {
+  const max = Math.max(0, metrics.height - metrics.viewport)
+  if (max <= 0) return 0
+  return Math.min(1, Math.max(0, metrics.top / max))
+}
+
+function topFromRatio(metrics: ScrollMetrics, ratio: number): number {
+  const max = Math.max(0, metrics.height - metrics.viewport)
+  if (max <= 0) return 0
+  return Math.round(max * Math.min(1, Math.max(0, ratio)))
+}
+
+function isMarkdownPath(path: string): boolean {
+  return /\.md$/i.test(path)
+}
+
+function getHtmlPreviewMetrics(iframe: HTMLIFrameElement | null): ScrollMetrics | null {
+  try {
+    if (!iframe?.contentDocument || !iframe.contentWindow) return null
+    const doc = iframe.contentDocument
+    const win = iframe.contentWindow
+    const el = doc.scrollingElement ?? doc.documentElement ?? doc.body
+    if (!el) return null
+    return {
+      top: Math.max(el.scrollTop || 0, win.scrollY || 0, doc.documentElement?.scrollTop || 0, doc.body?.scrollTop || 0),
+      height: Math.max(el.scrollHeight || 0, doc.body?.scrollHeight || 0, doc.documentElement?.scrollHeight || 0),
+      viewport: win.innerHeight || el.clientHeight || 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+function setHtmlPreviewScrollTop(iframe: HTMLIFrameElement | null, top: number) {
+  try {
+    const doc = iframe?.contentDocument
+    const win = iframe?.contentWindow
+    if (!doc || !win) return
+    const el = doc.scrollingElement ?? doc.documentElement ?? doc.body
+    if (!el) return
+    const next = Math.max(0, Math.round(top))
+    el.scrollTop = next
+    if (doc.documentElement) doc.documentElement.scrollTop = next
+    if (doc.body) doc.body.scrollTop = next
+    win.scrollTo(0, next)
+  } catch {
+    // ignore
+  }
+}
+
+function getMarkdownPreviewMetrics(node: HTMLDivElement | null): ScrollMetrics | null {
+  if (!node) return null
+  return {
+    top: node.scrollTop,
+    height: node.scrollHeight,
+    viewport: node.clientHeight,
+  }
+}
+
 type ViewMode = 'preview' | 'code' | 'split'
 
 export function DocViewer({
@@ -195,6 +274,15 @@ export function DocViewer({
 }) {
   const navigate = useNavigate()
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const markdownScrollRef = useRef<HTMLDivElement | null>(null)
+  const splitEditorRef = useRef<SplitEditorHandle | null>(null)
+  const splitEditorScrollCleanupRef = useRef<(() => void) | null>(null)
+  const splitScrollLockRef = useRef<SplitScrollSource | null>(null)
+  const splitScrollUnlockTimerRef = useRef<number | null>(null)
+  const splitPollTimerRef = useRef<number | null>(null)
+  const lastEditorScrollKeyRef = useRef<string>('')
+  const lastPreviewScrollKeyRef = useRef<string>('')
+  const lastSplitSourceRef = useRef<SplitScrollSource | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   const [connected, setConnected] = useState(false)
@@ -211,6 +299,252 @@ export function DocViewer({
   const aiRunning = runningDocId === doc.id
   const lockedByOther = !!lockInfo?.locked && lockInfo.owner?.id !== user?.id
   const lockOwnerName = lockInfo?.owner?.name || '其他用户'
+
+  /**
+   * iframe 初始要加载的子路径（相对资源根），来自外层 URL 的 ?p=...
+   *
+   * 关键时序：useMemo 在 render 阶段执行，useEffect 在 commit 之后执行；
+   * 因此 ref 必须在「render 阶段」就完成赋值，否则首次 useMemo(src) 拿不到 ?p= 值，
+   * iframe 会先用 entryFile 加载，随后 onLoad 回调又把空值写回外层 URL，导致 ?p= 被抹掉。
+   *
+   * 解决：用一个「绑定到当前 docId」的同步引用，render 阶段发现 docId 变化就立即重读 ?p=。
+   */
+  const initialInnerPathRef = useRef<{ docId: string; value: string }>({ docId: '', value: '' })
+  if (initialInnerPathRef.current.docId !== doc.id) {
+    initialInnerPathRef.current = {
+      docId: doc.id,
+      value: readInnerPathFromOuter(),
+    }
+    console.log('[DocViewer] init innerPath from outer (sync)', {
+      docId: doc.id,
+      innerPath: initialInnerPathRef.current.value,
+    })
+  }
+
+  const previewFile = useMemo(() => {
+    const inner = initialInnerPathRef.current.value || (doc.entryFile || 'index.html')
+    return inner.split('#')[0].split('?')[0] || 'index.html'
+  }, [doc.id, doc.entryFile, reloadKey])
+  const markdownPreview = /\.md$/i.test(previewFile)
+
+  const clearSplitScrollLock = useCallback(() => {
+    if (splitScrollUnlockTimerRef.current != null) {
+      window.clearTimeout(splitScrollUnlockTimerRef.current)
+      splitScrollUnlockTimerRef.current = null
+    }
+    splitScrollLockRef.current = null
+  }, [])
+
+  useEffect(() => () => {
+    clearSplitScrollLock()
+  }, [clearSplitScrollLock])
+
+  useEffect(() => {
+    clearSplitScrollLock()
+  }, [doc.id, mode, clearSplitScrollLock])
+
+  const queueSplitScrollUnlock = useCallback(() => {
+    if (splitScrollUnlockTimerRef.current != null) {
+      window.clearTimeout(splitScrollUnlockTimerRef.current)
+    }
+    splitScrollUnlockTimerRef.current = window.setTimeout(() => {
+      splitScrollLockRef.current = null
+      splitScrollUnlockTimerRef.current = null
+    }, 80)
+  }, [])
+
+  const syncSplitScroll = useCallback((source: SplitScrollSource, metrics: ScrollMetrics, apply: (ratio: number) => void) => {
+    if (mode !== 'split') return
+    if (splitScrollLockRef.current === source) return
+    const ratio = ratioFromMetrics(metrics)
+    splitScrollLockRef.current = source === 'editor' ? 'preview' : 'editor'
+    apply(ratio)
+    queueSplitScrollUnlock()
+  }, [mode, queueSplitScrollUnlock])
+
+  const syncFromEditor = useCallback(() => {
+    if (!splitEditorRef.current) return
+    lastSplitSourceRef.current = 'editor'
+    syncSplitScroll('editor', {
+      top: splitEditorRef.current.getScrollTop(),
+      height: splitEditorRef.current.getScrollHeight(),
+      viewport: splitEditorRef.current.getViewportHeight(),
+    }, (ratio) => {
+      const target = markdownScrollRef.current
+      if (target) {
+        target.scrollTop = topFromRatio({
+          top: target.scrollTop,
+          height: target.scrollHeight,
+          viewport: target.clientHeight,
+        }, ratio)
+        return
+      }
+      const win = iframeRef.current?.contentWindow
+      const docEl = iframeRef.current?.contentDocument?.scrollingElement ?? iframeRef.current?.contentDocument?.documentElement
+      if (win && docEl) {
+        const max = Math.max(0, docEl.scrollHeight - win.innerHeight)
+        win.scrollTo(0, Math.round(max * Math.min(1, Math.max(0, ratio))))
+      }
+    })
+  }, [syncSplitScroll])
+
+  const syncFromPreview = useCallback(() => {
+    lastSplitSourceRef.current = 'preview'
+    if (markdownPreview) {
+      const target = markdownScrollRef.current
+      if (!target) return
+      syncSplitScroll('preview', {
+        top: target.scrollTop,
+        height: target.scrollHeight,
+        viewport: target.clientHeight,
+      }, (ratio) => {
+        const editor = splitEditorRef.current
+        if (!editor) return
+        editor.setScrollTop(topFromRatio({
+          top: editor.getScrollTop(),
+          height: editor.getScrollHeight(),
+          viewport: editor.getViewportHeight(),
+        }, ratio))
+      })
+      return
+    }
+
+    const win = iframeRef.current?.contentWindow
+    const doc = iframeRef.current?.contentDocument
+    const el = doc?.scrollingElement ?? doc?.documentElement ?? doc?.body
+    if (!win || !el) return
+    syncSplitScroll('preview', {
+      top: win.scrollY || el.scrollTop || 0,
+      height: Math.max(el.scrollHeight, doc?.body?.scrollHeight ?? 0, doc?.documentElement?.scrollHeight ?? 0),
+      viewport: win.innerHeight || el.clientHeight || 0,
+    }, (ratio) => {
+      const editor = splitEditorRef.current
+      if (!editor) return
+      editor.setScrollTop(topFromRatio({
+        top: editor.getScrollTop(),
+        height: editor.getScrollHeight(),
+        viewport: editor.getViewportHeight(),
+      }, ratio))
+    })
+  }, [markdownPreview, syncSplitScroll])
+
+  useEffect(() => {
+    if (mode !== 'split') return
+    splitScrollLockRef.current = null
+    lastEditorScrollKeyRef.current = ''
+    lastPreviewScrollKeyRef.current = ''
+
+    const raf = window.requestAnimationFrame(() => {
+      if (lastSplitSourceRef.current === 'preview') {
+        syncFromPreview()
+      } else {
+        syncFromEditor()
+      }
+
+      const editor = splitEditorRef.current
+      const previewMetrics = markdownPreview
+        ? getMarkdownPreviewMetrics(markdownScrollRef.current)
+        : getHtmlPreviewMetrics(iframeRef.current)
+      if (editor) {
+        lastEditorScrollKeyRef.current = scrollKey({
+          top: editor.getScrollTop(),
+          height: editor.getScrollHeight(),
+          viewport: editor.getViewportHeight(),
+        })
+      }
+      if (previewMetrics) {
+        lastPreviewScrollKeyRef.current = scrollKey(previewMetrics)
+      }
+    })
+
+    return () => window.cancelAnimationFrame(raf)
+  }, [doc.id, mode, markdownPreview, reloadKey, syncFromEditor, syncFromPreview])
+
+  useEffect(() => {
+    if (splitPollTimerRef.current != null) {
+      window.clearInterval(splitPollTimerRef.current)
+      splitPollTimerRef.current = null
+    }
+    if (mode !== 'split') return
+    splitPollTimerRef.current = window.setInterval(() => {
+      const editor = splitEditorRef.current
+      const editorMetrics = editor ? {
+        top: editor.getScrollTop(),
+        height: editor.getScrollHeight(),
+        viewport: editor.getViewportHeight(),
+      } : null
+      const previewMetrics = markdownPreview
+        ? getMarkdownPreviewMetrics(markdownScrollRef.current)
+        : getHtmlPreviewMetrics(iframeRef.current)
+      if (!editorMetrics || !previewMetrics) return
+
+      const editorKey = scrollKey(editorMetrics)
+      const previewKey = scrollKey(previewMetrics)
+
+      if (editorKey !== lastEditorScrollKeyRef.current) {
+        lastEditorScrollKeyRef.current = editorKey
+        if (splitScrollLockRef.current !== 'editor') {
+          syncSplitScroll('editor', editorMetrics, (ratio) => {
+            if (markdownPreview) {
+              const target = markdownScrollRef.current
+              if (!target) return
+              target.scrollTop = topFromRatio({
+                top: target.scrollTop || 0,
+                height: target.scrollHeight || 0,
+                viewport: target.clientHeight || 0,
+              }, ratio)
+              return
+            }
+            const targetMetrics = getHtmlPreviewMetrics(iframeRef.current)
+            if (!targetMetrics) return
+            setHtmlPreviewScrollTop(iframeRef.current, topFromRatio(targetMetrics, ratio))
+          })
+          const targetMetrics = markdownPreview
+            ? getMarkdownPreviewMetrics(markdownScrollRef.current)
+            : getHtmlPreviewMetrics(iframeRef.current)
+          if (targetMetrics) lastPreviewScrollKeyRef.current = scrollKey(targetMetrics)
+        }
+      }
+
+      if (previewKey !== lastPreviewScrollKeyRef.current) {
+        lastPreviewScrollKeyRef.current = previewKey
+        if (splitScrollLockRef.current !== 'preview') {
+          syncSplitScroll('preview', previewMetrics, (ratio) => {
+            const editorApi = splitEditorRef.current
+            if (!editorApi) return
+            editorApi.setScrollTop(topFromRatio({
+              top: editorApi.getScrollTop(),
+              height: editorApi.getScrollHeight(),
+              viewport: editorApi.getViewportHeight(),
+            }, ratio))
+          })
+          if (editorMetrics) lastEditorScrollKeyRef.current = scrollKey(editorMetrics)
+        }
+      }
+    }, 120)
+    return () => {
+      if (splitPollTimerRef.current != null) {
+        window.clearInterval(splitPollTimerRef.current)
+        splitPollTimerRef.current = null
+      }
+    }
+  }, [mode, markdownPreview, syncSplitScroll])
+
+  const handleEditorMount = useCallback((api: SplitEditorHandle) => {
+    splitEditorRef.current = api
+    if (splitEditorScrollCleanupRef.current) {
+      splitEditorScrollCleanupRef.current()
+      splitEditorScrollCleanupRef.current = null
+    }
+    splitEditorScrollCleanupRef.current = api.onScroll(syncFromEditor)
+  }, [syncFromEditor])
+
+  useEffect(() => () => {
+    if (splitEditorScrollCleanupRef.current) {
+      splitEditorScrollCleanupRef.current()
+      splitEditorScrollCleanupRef.current = null
+    }
+  }, [])
 
   // [debug] 渲染日志
   console.log('[DocViewer] render', {
@@ -236,27 +570,6 @@ export function DocViewer({
     console.log('[DocViewer] doc changed → reset activeFile', { docId: doc.id, entryFile: doc.entryFile })
     setActiveFile(doc.entryFile || 'index.html')
   }, [doc.id, doc.entryFile])
-
-  /**
-   * iframe 初始要加载的子路径（相对资源根），来自外层 URL 的 ?p=...
-   *
-   * 关键时序：useMemo 在 render 阶段执行，useEffect 在 commit 之后执行；
-   * 因此 ref 必须在「render 阶段」就完成赋值，否则首次 useMemo(src) 拿不到 ?p= 值，
-   * iframe 会先用 entryFile 加载，随后 onLoad 回调又把空值写回外层 URL，导致 ?p= 被抹掉。
-   *
-   * 解决：用一个「绑定到当前 docId」的同步引用，render 阶段发现 docId 变化就立即重读 ?p=。
-   */
-  const initialInnerPathRef = useRef<{ docId: string; value: string }>({ docId: '', value: '' })
-  if (initialInnerPathRef.current.docId !== doc.id) {
-    initialInnerPathRef.current = {
-      docId: doc.id,
-      value: readInnerPathFromOuter(),
-    }
-    console.log('[DocViewer] init innerPath from outer (sync)', {
-      docId: doc.id,
-      innerPath: initialInnerPathRef.current.value,
-    })
-  }
 
   // 上一次已同步到外层 URL 的内部路径，用作环路抑制
   const lastSyncedInnerPathRef = useRef<string>(initialInnerPathRef.current.value)
@@ -288,12 +601,6 @@ export function DocViewer({
     })
     return url
   }, [doc.id, doc.entryFile, reloadKey])
-
-  const previewFile = useMemo(() => {
-    const inner = initialInnerPathRef.current.value || (doc.entryFile || 'index.html')
-    return inner.split('#')[0].split('?')[0] || 'index.html'
-  }, [doc.id, doc.entryFile, reloadKey])
-  const markdownPreview = /\.md$/i.test(previewFile)
 
   // 加载文件列表
   useEffect(() => {
@@ -663,7 +970,13 @@ export function DocViewer({
           {/* 预览模式 */}
           <div className={cn('absolute inset-0', mode === 'preview' ? 'block' : 'hidden')}>
             {markdownPreview ? (
-              <MarkdownPreview doc={doc} filePath={previewFile} reloadKey={reloadKey} />
+              <MarkdownPreview
+                ref={markdownScrollRef}
+                doc={doc}
+                filePath={previewFile}
+                reloadKey={reloadKey}
+                onScroll={syncFromPreview}
+              />
             ) : (
               <PreviewFrame
                 ref={iframeRef}
@@ -685,6 +998,7 @@ export function DocViewer({
               readOnlyReason={`${lockOwnerName} 正在编辑，暂时不能编辑。`}
               externalReloadKey={reloadKey}
               onSavedExternally={() => setReloadKey((k) => k + 1)}
+              onEditorMount={handleEditorMount}
             />
           </div>
 
@@ -698,18 +1012,27 @@ export function DocViewer({
                 readOnlyReason={`${lockOwnerName} 正在编辑，暂时不能编辑。`}
                 externalReloadKey={reloadKey}
                 onSavedExternally={() => setReloadKey((k) => k + 1)}
+                onEditorMount={handleEditorMount}
               />
             </div>
             <div className="bg-white min-w-0 h-full relative overflow-hidden">
               {markdownPreview ? (
-                <MarkdownPreview doc={doc} filePath={previewFile} reloadKey={reloadKey} />
+                <MarkdownPreview
+                  ref={markdownScrollRef}
+                  doc={doc}
+                  filePath={previewFile}
+                  reloadKey={reloadKey}
+                  onScroll={syncFromPreview}
+                />
               ) : (
                 <PreviewFrame
+                  ref={iframeRef}
                   src={src}
                   title={`${doc.title} (split)`}
                   tag="split"
                   docId={doc.id}
                   onInnerNavigate={handleInnerNavigate}
+                  onScroll={syncFromPreview}
                 />
               )}
             </div>
@@ -735,12 +1058,16 @@ const PreviewFrame = forwardRef<
     tag?: string
     docId?: string
     onInnerNavigate?: (innerHref: string) => void
+    onScroll?: () => void
   }
->(function PreviewFrame({ src, title, tag = 'unknown', docId, onInnerNavigate }, ref) {
+>(function PreviewFrame({ src, title, tag = 'unknown', docId, onInnerNavigate, onScroll }, ref) {
   const innerRef = useRef<HTMLIFrameElement | null>(null)
   const loadStartRef = useRef<number>(0)
   const lastInnerHrefRef = useRef<string>('')
   const pollTimerRef = useRef<number | null>(null)
+  const scrollPollTimerRef = useRef<number | null>(null)
+  const lastScrollKeyRef = useRef<string>('')
+  const scrollCleanupRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     console.log(`[PreviewFrame:${tag}] mount`, { src, title })
@@ -749,6 +1076,14 @@ const PreviewFrame = forwardRef<
       if (pollTimerRef.current != null) {
         window.clearInterval(pollTimerRef.current)
         pollTimerRef.current = null
+      }
+      if (scrollPollTimerRef.current != null) {
+        window.clearInterval(scrollPollTimerRef.current)
+        scrollPollTimerRef.current = null
+      }
+      if (scrollCleanupRef.current) {
+        scrollCleanupRef.current()
+        scrollCleanupRef.current = null
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -826,6 +1161,41 @@ const PreviewFrame = forwardRef<
 
         // ★ 同步 iframe 内部 URL 到上层（每次新文档加载、表单提交、链接跳转都会触发）
         checkAndNotify()
+
+        if (scrollCleanupRef.current) {
+          scrollCleanupRef.current()
+          scrollCleanupRef.current = null
+        }
+        if (scrollPollTimerRef.current != null) {
+          window.clearInterval(scrollPollTimerRef.current)
+          scrollPollTimerRef.current = null
+        }
+        if (onScroll) {
+          const onInnerScroll = () => onScroll()
+          try {
+            const doc = target.contentDocument
+            const win = target.contentWindow
+            const el = doc?.scrollingElement ?? doc?.documentElement ?? doc?.body
+            if (win && el) {
+              el.addEventListener('scroll', onInnerScroll, { passive: true })
+              win.addEventListener('resize', onInnerScroll, { passive: true })
+              scrollCleanupRef.current = () => {
+                el.removeEventListener('scroll', onInnerScroll)
+                win.removeEventListener('resize', onInnerScroll)
+              }
+              const emitIfChanged = () => {
+                const key = `${Math.round(el.scrollTop || 0)}:${Math.round(el.scrollHeight || 0)}:${Math.round(win.innerHeight || el.clientHeight || 0)}`
+                if (key === lastScrollKeyRef.current) return
+                lastScrollKeyRef.current = key
+                onInnerScroll()
+              }
+              emitIfChanged()
+              scrollPollTimerRef.current = window.setInterval(emitIfChanged, 120)
+            }
+          } catch (err) {
+            console.warn(`[PreviewFrame:${tag}] add scroll listener failed`, err)
+          }
+        }
 
         // ★ 启动轻量轮询，捕获 SPA 内部的 pushState / replaceState 变化
         // （iframe 内若是 React/Vue/Hash 路由，不会触发 onLoad，也不易跨上下文 hook）

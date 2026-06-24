@@ -12,6 +12,13 @@ interface Props {
   /** 外部触发重拉文件内容（如 WebSocket reload、AI 流式写入） */
   externalReloadKey?: number
   onSavedExternally?: () => void  // 保存成功后触发预览刷新
+  onEditorMount?: (editor: {
+    getScrollTop: () => number
+    getScrollHeight: () => number
+    getViewportHeight: () => number
+    setScrollTop: (top: number) => void
+    onScroll: (handler: () => void) => () => void
+  }) => void
 }
 
 type Status = 'idle' | 'loading' | 'dirty' | 'saving' | 'saved' | 'error'
@@ -32,7 +39,7 @@ function inferLang(path: string): string {
   }
 }
 
-export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalReloadKey, onSavedExternally }: Props) {
+export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalReloadKey, onSavedExternally, onEditorMount }: Props) {
   const [content, setContent] = useState('')
   const [status, setStatus] = useState<Status>('loading')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -98,6 +105,16 @@ export function CodeEditor({ doc, filePath, readOnly, readOnlyReason, externalRe
   // Cmd/Ctrl+S 保存
   const handleMount: OnMount = (ed, monaco) => {
     editorRef.current = ed
+    onEditorMount?.({
+      getScrollTop: () => ed.getScrollTop(),
+      getScrollHeight: () => ed.getScrollHeight(),
+      getViewportHeight: () => ed.getDomNode()?.clientHeight ?? 0,
+      setScrollTop: (top: number) => ed.setScrollTop(top),
+      onScroll: (handler: () => void) => {
+        const disposable = ed.onDidScrollChange(handler)
+        return () => disposable.dispose()
+      },
+    })
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       saveRef.current()
     })
